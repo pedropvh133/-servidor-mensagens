@@ -12,35 +12,43 @@ app.use(bodyParser.json());
 let users = []; // [{ username, password }]
 let messages = [];
 
-// Criar/Verificar usuário com Senha
-app.post('/create_user', (req, res) => {
+// ROTA: REGISTRO (Criar Conta)
+app.post('/register', (req, res) => {
     const { username, password } = req.body;
-    if (!username || !password) return res.status(400).send('Nome e senha obrigatórios');
+    if (!username || !password) return res.status(400).json({ status: 'error', message: 'Dados incompletos' });
+
+    const userExists = users.find(u => u.username === username);
+    if (userExists) {
+        return res.status(400).json({ status: 'error', message: 'USUÁRIO_JÁ_REGISTRADO' });
+    }
+
+    users.push({ username, password });
+    console.log(`Novo usuário: ${username}`);
+    res.status(201).json({ status: 'ok', message: 'REGISTRO_CONCLUÍDO' });
+});
+
+// ROTA: LOGIN (Entrar)
+app.post('/login', (req, res) => {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ status: 'error', message: 'Dados incompletos' });
 
     const user = users.find(u => u.username === username);
 
     if (!user) {
-        // Novo usuário: define a senha
-        users.push({ username, password });
-        console.log(`Novo usuário criado: ${username}`);
-        return res.status(200).json({ status: 'ok', message: 'Usuário criado' });
+        return res.status(404).json({ status: 'error', message: 'USUÁRIO_NÃO_ENCONTRADO' });
+    }
+
+    if (user.password === password) {
+        console.log(`Login: ${username}`);
+        res.status(200).json({ status: 'ok', message: 'ACESSO_PERMITIDO' });
     } else {
-        // Usuário existe: verifica a senha
-        if (user.password === password) {
-            console.log(`Login realizado: ${username}`);
-            return res.status(200).json({ status: 'ok', message: 'Login bem-sucedido' });
-        } else {
-            console.log(`Tentativa de login falhou (senha errada): ${username}`);
-            return res.status(401).json({ status: 'error', message: 'Senha incorreta' });
-        }
+        res.status(401).json({ status: 'error', message: 'SENHA_INCORRETA' });
     }
 });
 
 // Enviar mensagem
 app.post('/send_message', (req, res) => {
     const { username, recipient, content } = req.body;
-    if (!username || !recipient || !content) return res.status(400).send('Dados incompletos');
-
     const msg = {
         id: Date.now(),
         from: username,
@@ -48,35 +56,27 @@ app.post('/send_message', (req, res) => {
         content,
         time: new Date().toLocaleTimeString()
     };
-
     messages.push(msg);
-    console.log(`Mensagem de ${username} para ${recipient}`);
     res.status(200).json({ status: 'enviada' });
 });
 
 // Buscar mensagens recebidas
 app.get('/messages/:username', (req, res) => {
-    const { username } = req.params;
-    const inbox = messages.filter(m => m.to === username);
+    const inbox = messages.filter(m => m.to === req.params.username);
     res.json(inbox);
 });
 
-// Apagar todas as mensagens recebidas (Limpar Caixa)
+// Limpar Caixa
 app.post('/clear_messages', (req, res) => {
     const { username, password } = req.body;
     const user = users.find(u => u.username === username);
-
     if (user && user.password === password) {
         messages = messages.filter(m => m.to !== username);
-        console.log(`Caixa de entrada limpa para: ${username}`);
-        res.status(200).json({ status: 'ok', message: 'Caixa limpa' });
+        res.status(200).json({ status: 'ok' });
     } else {
-        res.status(401).json({ status: 'error', message: 'Acesso negado' });
+        res.status(401).json({ status: 'negado' });
     }
 });
 
-app.get('/', (req, res) => res.send('Servidor de Mensagens Seguro Ativo!'));
-
-app.listen(port, () => {
-    console.log(`Servidor rodando na porta ${port}`);
-});
+app.get('/', (req, res) => res.send('CyberServer v2.0 Ativo!'));
+app.listen(port, () => console.log(`CyberServer na porta ${port}`));
