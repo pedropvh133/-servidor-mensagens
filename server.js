@@ -6,9 +6,9 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(bodyParser.json({ limit: '30mb' }));
+app.use(bodyParser.json({ limit: '100mb' }));
 
-let users = []; // [{ username, password, lastSeen, profilePic, privacyLastSeen, privacyProfilePic, privacyCalls, privacyBio }]
+let users = []; // [{ username, password, lastSeen, profilePic, privacyLastSeen, privacyProfilePic, privacyCalls, privacyBio, bio }]
 let messages = [];
 let groups = [];
 let callSignals = {};
@@ -30,7 +30,8 @@ app.post('/register', (req, res) => {
         profilePic: null,
         privacyLastSeen: 'Todos',
         privacyProfilePic: 'Todos',
-        privacyCalls: 'On'
+        privacyCalls: 'On',
+        bio: 'Olá! Estou usando o Noctis Messenger.'
     });
     res.status(201).json({ status: 'ok' });
 });
@@ -46,21 +47,20 @@ app.post('/login', (req, res) => {
             profilePic: user.profilePic,
             privacyLastSeen: user.privacyLastSeen,
             privacyProfilePic: user.privacyProfilePic,
-            privacyCalls: user.privacyCalls || 'On'
+            privacyCalls: user.privacyCalls || 'On',
+            bio: user.bio || 'Olá! Estou usando o Noctis Messenger.'
         });
     } else res.status(401).json({ error: 'SENHA_INCORRETA' });
 });
 
-// ATUALIZAÇÃO V14.0: Exige oldPassword para qualquer mudança
 app.post('/user/update_settings', (req, res) => {
-    const { username, currentPassword, newUsername, newPassword, privacyLastSeen, privacyProfilePic, privacyCalls } = req.body;
+    const { username, currentPassword, newUsername, newPassword, privacyLastSeen, privacyProfilePic, privacyCalls, bio } = req.body;
     const user = users.find(u => u.username === username && u.password === currentPassword);
 
     if (!user) return res.status(401).json({ error: 'SENHA_ATUAL_INCORRETA' });
 
     if (newUsername && newUsername !== username) {
         if (users.find(u => u.username === newUsername)) return res.status(400).json({ error: 'NOME_JÁ_EM_USO' });
-        // Atualiza referências
         messages.forEach(m => { if (m.from === username) m.from = newUsername; if (m.to === username) m.to = newUsername; });
         groups.forEach(g => {
             g.members = g.members.map(m => m === username ? newUsername : m);
@@ -72,13 +72,15 @@ app.post('/user/update_settings', (req, res) => {
     if (privacyLastSeen) user.privacyLastSeen = privacyLastSeen;
     if (privacyProfilePic) user.privacyProfilePic = privacyProfilePic;
     if (privacyCalls) user.privacyCalls = privacyCalls;
+    if (bio !== undefined) user.bio = bio;
 
     res.status(200).json({
         status: 'ok',
         username: user.username,
         privacyLastSeen: user.privacyLastSeen,
         privacyProfilePic: user.privacyProfilePic,
-        privacyCalls: user.privacyCalls
+        privacyCalls: user.privacyCalls,
+        bio: user.bio
     });
 });
 
@@ -96,7 +98,28 @@ app.post('/user/delete_account', (req, res) => {
     } else res.status(401).send('Erro');
 });
 
-// --- GESTÃO DE GRUPOS AVANÇADA (V14.0) ---
+app.post('/user/update_pic', (req, res) => {
+    const { username, profilePic } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        user.profilePic = profilePic;
+        res.status(200).json({ status: 'ok' });
+    } else res.status(404).send('Erro');
+});
+
+app.get('/user/info/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    if (!user) return res.status(404).send('Not found');
+    const canSeePic = user.privacyProfilePic === 'Todos';
+    res.json({
+        username: user.username,
+        profilePic: canSeePic ? user.profilePic : null,
+        lastSeen: user.lastSeen,
+        privacyLastSeen: user.privacyLastSeen,
+        bio: user.bio || 'Olá! Estou usando o Noctis Messenger.'
+    });
+});
+
 app.post('/group/update_name', (req, res) => {
     const { groupId, adminUser, newName } = req.body;
     const group = groups.find(g => g.id === groupId);
@@ -114,20 +137,6 @@ app.post('/group/delete', (req, res) => {
         messages = messages.filter(m => m.to !== groupId);
         res.status(200).json({ status: 'ok' });
     } else res.status(403).send('Não autorizado');
-});
-
-// --- RESTO DAS ROTAS ---
-app.get('/user/info/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    if (!user) return res.status(404).send('Not found');
-    const canSeePic = user.privacyProfilePic === 'Todos';
-    res.json({ username: user.username, profilePic: canSeePic ? user.profilePic : null, lastSeen: user.lastSeen, privacyLastSeen: user.privacyLastSeen });
-});
-
-app.post('/user/update_pic', (req, res) => {
-    const user = users.find(u => u.username === req.body.username);
-    if (user) { user.profilePic = req.body.profilePic; res.status(200).json({ status: 'ok' }); }
-    else res.status(404).send('Erro');
 });
 
 app.post('/call/signal', (req, res) => {
@@ -206,5 +215,5 @@ app.post('/clear_messages', (req, res) => {
     else res.status(401).send('Erro');
 });
 
-app.get('/', (req, res) => res.send('NOCTIS Blind Server v14.0 Ativo!'));
+app.get('/', (req, res) => res.send('NOCTIS Blind Server v15.0 Ativo!'));
 app.listen(port, () => console.log(`Servidor NOCTIS na porta ${port}`));
