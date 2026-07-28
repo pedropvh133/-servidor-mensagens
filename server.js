@@ -187,5 +187,5 @@ app.post('/clear_messages', (req, res) => {
     else res.status(401).send('Erro');
 });
 
-app.get('/', (req, res) => res.send('NEXUS Blind Server v13.0 Ativo!'));
-app.listen(port, () => console.log(`Servidor NEXUS na porta ${port}`));
+app.get('/', (req, res) => res.send('NOCTIS Blind Server v13.0 Ativo!'));
+app.listen(port, () => console.log(`Servidor NOCTIS na porta ${port}`));
