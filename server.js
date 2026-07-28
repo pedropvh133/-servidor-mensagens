@@ -8,9 +8,9 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(bodyParser.json({ limit: '30mb' }));
 
-let users = []; // [{ username, password, lastSeen }]
-let messages = []; // [{ id, from, to, content, isAudio, isImage, isVideo, viewOnce, time, read, isGroup }]
-let groups = []; // [{ id, name, members: [], admins: [] }]
+let users = []; // [{ username, password, lastSeen, profilePic }]
+let messages = [];
+let groups = []; // [{ id, name, members: [], admins: [], profilePic }]
 
 function updateSeen(username) {
     const user = users.find(u => u.username === username);
@@ -21,7 +21,7 @@ app.post('/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Dados incompletos' });
     if (users.find(u => u.username === username)) return res.status(400).json({ error: 'USUÁRIO_JÁ_EXISTE' });
-    users.push({ username, password, lastSeen: Date.now() });
+    users.push({ username, password, lastSeen: Date.now(), profilePic: null });
     res.status(201).json({ status: 'ok' });
 });
 
@@ -31,8 +31,27 @@ app.post('/login', (req, res) => {
     if (!user) return res.status(404).json({ error: 'NÃO_ENCONTRADO' });
     if (user.password === password) {
         user.lastSeen = Date.now();
-        res.status(200).json({ status: 'ok' });
+        res.status(200).json({ status: 'ok', profilePic: user.profilePic });
     } else res.status(401).json({ error: 'SENHA_INCORRETA' });
+});
+
+app.get('/user/info/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    if (!user) return res.status(404).send('Not found');
+    res.json({
+        username: user.username,
+        profilePic: user.profilePic,
+        lastSeen: user.lastSeen
+    });
+});
+
+app.post('/user/update_pic', (req, res) => {
+    const { username, profilePic } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        user.profilePic = profilePic;
+        res.status(200).json({ status: 'ok' });
+    } else res.status(404).send('Erro');
 });
 
 app.get('/status/:username', (req, res) => {
@@ -49,7 +68,7 @@ app.post('/send_message', (req, res) => {
     const msg = {
         id: Date.now(),
         from: username,
-        to: recipient, // Se isGroup=true, recipient é o groupId
+        to: recipient,
         content,
         isAudio: isAudio || false,
         isImage: isImage || false,
@@ -75,17 +94,11 @@ app.get('/conversation/:user1/:user2', (req, res) => {
     res.json(chat);
 });
 
-// --- ROTAS DE GRUPO ---
-
+// --- GRUPOS ---
 app.post('/create_group', (req, res) => {
     const { name, creator } = req.body;
     const groupId = 'group_' + Date.now();
-    const newGroup = {
-        id: groupId,
-        name: name,
-        members: [creator],
-        admins: [creator]
-    };
+    const newGroup = { id: groupId, name: name, members: [creator], admins: [creator], profilePic: null };
     groups.push(newGroup);
     res.status(201).json(newGroup);
 });
@@ -93,6 +106,15 @@ app.post('/create_group', (req, res) => {
 app.get('/groups/:username', (req, res) => {
     const userGroups = groups.filter(g => g.members.includes(req.params.username));
     res.json(userGroups);
+});
+
+app.post('/group/update_pic', (req, res) => {
+    const { groupId, adminUser, profilePic } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        group.profilePic = profilePic;
+        res.status(200).json(group);
+    } else res.status(403).send('Erro');
 });
 
 app.get('/group/messages/:groupId', (req, res) => {
@@ -103,71 +125,58 @@ app.get('/group/messages/:groupId', (req, res) => {
 app.post('/group/add_member', (req, res) => {
     const { groupId, adminUser, newMember } = req.body;
     const group = groups.find(g => g.id === groupId);
-    if (!group) return res.status(404).send('Grupo não encontrado');
-    if (!group.admins.includes(adminUser)) return res.status(403).send('Não é ADM');
-
-    if (!group.members.includes(newMember)) group.members.push(newMember);
-    res.status(200).json(group);
+    if (group && group.admins.includes(adminUser)) {
+        if (!group.members.includes(newMember)) group.members.push(newMember);
+        res.status(200).json(group);
+    } else res.status(403).send('Erro');
 });
 
 app.post('/group/remove_member', (req, res) => {
     const { groupId, adminUser, targetUser } = req.body;
     const group = groups.find(g => g.id === groupId);
-    if (!group) return res.status(404).send('Grupo não encontrado');
-    if (!group.admins.includes(adminUser)) return res.status(403).send('Não é ADM');
-
-    group.members = group.members.filter(m => m !== targetUser);
-    group.admins = group.admins.filter(a => m !== targetUser);
-    res.status(200).json(group);
+    if (group && group.admins.includes(adminUser)) {
+        group.members = group.members.filter(m => m !== targetUser);
+        group.admins = group.admins.filter(a => a !== targetUser);
+        res.status(200).json(group);
+    } else res.status(403).send('Erro');
 });
 
 app.post('/group/promote', (req, res) => {
     const { groupId, adminUser, targetUser } = req.body;
     const group = groups.find(g => g.id === groupId);
-    if (!group) return res.status(404).send('Grupo não encontrado');
-    if (!group.admins.includes(adminUser)) return res.status(403).send('Não é ADM');
-
-    if (!group.admins.includes(targetUser)) group.admins.push(targetUser);
-    res.status(200).json(group);
+    if (group && group.admins.includes(adminUser)) {
+        if (!group.admins.includes(targetUser)) group.admins.push(targetUser);
+        res.status(200).json(group);
+    } else res.status(403).send('Erro');
 });
-
-// --- FIM ROTAS DE GRUPO ---
 
 app.post('/delete_message', (req, res) => {
     const { messageId, username } = req.body;
     const index = messages.findIndex(m => m.id === messageId && m.from === username);
-    if (index !== -1) {
-        messages.splice(index, 1);
-        res.status(200).json({ status: 'ok' });
-    } else res.status(404).send('Erro');
+    if (index !== -1) { messages.splice(index, 1); res.status(200).json({ status: 'ok' }); }
+    else res.status(404).send('Erro');
 });
 
 app.post('/destroy_view_once', (req, res) => {
     const { messageId, username } = req.body;
     const index = messages.findIndex(m => m.id === messageId && m.to === username);
-    if (index !== -1) {
-        messages.splice(index, 1);
-        res.status(200).json({ status: 'ok' });
-    } else res.status(404).send('Erro');
+    if (index !== -1) { messages.splice(index, 1); res.status(200).json({ status: 'ok' }); }
+    else res.status(404).send('Erro');
 });
 
 app.post('/mark_read', (req, res) => {
     const { username, contact } = req.body;
     updateSeen(username);
-    messages.forEach(m => {
-        if (m.from === contact && m.to === username) m.read = true;
-    });
+    messages.forEach(m => { if (m.from === contact && m.to === username) m.read = true; });
     res.status(200).json({ status: 'ok' });
 });
 
 app.post('/clear_messages', (req, res) => {
     const { username, password } = req.body;
     const user = users.find(u => u.username === username && u.password === password);
-    if (user) {
-        messages = messages.filter(m => m.to !== username);
-        res.status(200).json({ status: 'ok' });
-    } else res.status(401).send('Negado');
+    if (user) { messages = messages.filter(m => m.to !== username); res.status(200).json({ status: 'ok' }); }
+    else res.status(401).send('Erro');
 });
 
-app.get('/', (req, res) => res.send('CyberServer v8.0 (Grupos e ADM) Ativo!'));
+app.get('/', (req, res) => res.send('CyberServer v9.0 (Fotos de Perfil) Ativo!'));
 app.listen(port, () => console.log(`Servidor rodando na porta ${port}`));
