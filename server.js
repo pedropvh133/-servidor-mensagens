@@ -55,7 +55,6 @@ app.post('/login', (req, res) => {
 
 app.post('/user/update_settings', (req, res) => {
     const { username, currentPassword, oldPassword, newUsername, newPassword, privacyLastSeen, privacyProfilePic, privacyCalls, bio } = req.body;
-    // Tenta validar tanto com currentPassword quanto com oldPassword por retrocompatibilidade
     const pass = currentPassword || oldPassword;
     const user = users.find(u => u.username === username && u.password === pass);
 
@@ -133,41 +132,7 @@ app.get('/messages/unread/:username', (req, res) => {
     res.json(unread);
 });
 
-app.post('/call/signal', (req, res) => {
-    const { to, from, data } = req.body;
-    const targetUser = users.find(u => u.username === to);
-    if (targetUser && targetUser.privacyCalls === 'Off') return res.status(403).json({ error: 'BLOQUEADO' });
-    if (!callSignals[to]) callSignals[to] = [];
-    callSignals[to].push({ from, data, time: Date.now() });
-    res.status(200).json({ status: 'sent' });
-});
-
-app.get('/call/check/:username', (req, res) => {
-    const signals = callSignals[req.params.username] || [];
-    callSignals[req.params.username] = [];
-    res.json(signals);
-});
-
-app.get('/status/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    if (!user) return res.json({ status: 'OFFLINE' });
-    if ((Date.now() - user.lastSeen) / 1000 < 20) return res.json({ status: 'ONLINE' });
-    if (user.privacyLastSeen === 'Ninguém') return res.json({ status: 'OFFLINE' });
-    res.json({ status: `Visto por último ${new Date(user.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` });
-});
-
-app.post('/send_message', (req, res) => {
-    const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
-    updateSeen(username);
-    messages.push({ id: Date.now(), from: username, to: recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false });
-    res.status(200).json({ status: 'ok' });
-});
-
-app.get('/conversation/:user1/:user2', (req, res) => {
-    updateSeen(req.params.user1);
-    res.json(messages.filter(m => !m.isGroup && ((m.from === req.params.user1 && m.to === req.params.user2) || (m.from === req.params.user2 && m.to === req.params.user1))));
-});
-
+// --- GRUPOS AVANÇADOS V17.0 ---
 app.post('/create_group', (req, res) => {
     const { name, creator } = req.body;
     const newGroup = { id: 'group_' + Date.now(), name, members: [creator], admins: [creator], profilePic: null };
@@ -232,6 +197,50 @@ app.post('/group/promote', (req, res) => {
     } else res.status(403).send('Erro');
 });
 
+// --- CHAMADAS COLETIVAS V17.0 ---
+app.post('/call/signal', (req, res) => {
+    const { to, from, data } = req.body;
+
+    if (to.startsWith('group_')) {
+        const group = groups.find(g => g.id === to);
+        if (group) {
+            group.members.forEach(member => {
+                if (member !== from) {
+                    if (!callSignals[member]) callSignals[member] = [];
+                    callSignals[member].push({ from, groupName: group.name, data, time: Date.now() });
+                }
+            });
+            return res.status(200).json({ status: 'sent_to_group' });
+        }
+        return res.status(404).send('Grupo não encontrado');
+    }
+
+    const targetUser = users.find(u => u.username === to);
+    if (targetUser && targetUser.privacyCalls === 'Off') return res.status(403).json({ error: 'BLOQUEADO' });
+    if (!callSignals[to]) callSignals[to] = [];
+    callSignals[to].push({ from, data, time: Date.now() });
+    res.status(200).json({ status: 'sent' });
+});
+
+app.get('/call/check/:username', (req, res) => {
+    const signals = callSignals[req.params.username] || [];
+    callSignals[req.params.username] = [];
+    res.json(signals);
+});
+
+// --- MENSAGENS ---
+app.post('/send_message', (req, res) => {
+    const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
+    updateSeen(username);
+    messages.push({ id: Date.now(), from: username, to: recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false });
+    res.status(200).json({ status: 'ok' });
+});
+
+app.get('/conversation/:user1/:user2', (req, res) => {
+    updateSeen(req.params.user1);
+    res.json(messages.filter(m => !m.isGroup && ((m.from === req.params.user1 && m.to === req.params.user2) || (m.from === req.params.user2 && m.to === req.params.user1))));
+});
+
 app.get('/group/messages/:groupId', (req, res) => res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId)));
 
 app.post('/delete_message', (req, res) => {
@@ -258,5 +267,5 @@ app.post('/clear_messages', (req, res) => {
     else res.status(401).send('Erro');
 });
 
-app.get('/', (req, res) => res.send('NOCTIS Blind Server v16.2 Ativo!'));
+app.get('/', (req, res) => res.send('NOCTIS Blind Server v17.0 Ativo!'));
 app.listen(port, () => console.log(`Servidor NOCTIS na porta ${port}`));
