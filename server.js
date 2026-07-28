@@ -6,19 +6,17 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
-// Aumentar o limite para suportar áudio em Base64
-app.use(bodyParser.json({ limit: '10mb' }));
+// Limite aumentado para 20MB para suportar fotos comprimidas e vídeos curtos
+app.use(bodyParser.json({ limit: '20mb' }));
 
 let users = []; // [{ username, password, lastSeen }]
 let messages = [];
 
-// Helper: Atualiza o status do usuário
 function updateSeen(username) {
     const user = users.find(u => u.username === username);
     if (user) user.lastSeen = Date.now();
 }
 
-// ROTA: REGISTRO
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ status: 'error', message: 'Dados incompletos' });
@@ -27,7 +25,6 @@ app.post('/register', (req, res) => {
     res.status(201).json({ status: 'ok' });
 });
 
-// ROTA: LOGIN
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
     const user = users.find(u => u.username === username);
@@ -38,24 +35,16 @@ app.post('/login', (req, res) => {
     } else res.status(401).json({ status: 'error', message: 'SENHA_INCORRETA' });
 });
 
-// ROTA: STATUS ONLINE
 app.get('/status/:username', (req, res) => {
     const user = users.find(u => u.username === req.params.username);
     if (!user) return res.json({ status: 'OFFLINE' });
-
     const secondsAgo = (Date.now() - user.lastSeen) / 1000;
-    if (secondsAgo < 20) {
-        res.json({ status: 'ONLINE' });
-    } else {
-        const date = new Date(user.lastSeen);
-        const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        res.json({ status: `VISTO ÚLTIMA VEZ ${time}` });
-    }
+    if (secondsAgo < 20) res.json({ status: 'ONLINE' });
+    else res.json({ status: `Visto por último ${new Date(user.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` });
 });
 
-// ROTA: ENVIAR MENSAGEM (TEXTO OU ÁUDIO)
 app.post('/send_message', (req, res) => {
-    const { username, recipient, content, isAudio, viewOnce } = req.body;
+    const { username, recipient, content, isAudio, isImage, isVideo, viewOnce } = req.body;
     updateSeen(username);
     const msg = {
         id: Date.now(),
@@ -63,6 +52,8 @@ app.post('/send_message', (req, res) => {
         to: recipient,
         content,
         isAudio: isAudio || false,
+        isImage: isImage || false,
+        isVideo: isVideo || false,
         viewOnce: viewOnce || false,
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         read: false
@@ -71,7 +62,6 @@ app.post('/send_message', (req, res) => {
     res.status(200).json({ status: 'enviada' });
 });
 
-// ROTA: BUSCAR CONVERSA
 app.get('/conversation/:user1/:user2', (req, res) => {
     updateSeen(req.params.user1);
     const { user1, user2 } = req.params;
@@ -82,17 +72,15 @@ app.get('/conversation/:user1/:user2', (req, res) => {
     res.json(chat);
 });
 
-// ROTA: DESTRUIR MENSAGEM (Para Visualização Única)
 app.post('/destroy_message', (req, res) => {
     const { messageId, username } = req.body;
     const index = messages.findIndex(m => m.id === messageId && m.to === username);
     if (index !== -1) {
         messages.splice(index, 1);
-        res.status(200).json({ status: 'destroyed' });
+        res.status(200).json({ status: 'ok' });
     } else res.status(404).send('Não encontrada');
 });
 
-// ROTA: MARCAR COMO LIDA
 app.post('/mark_read', (req, res) => {
     const { username, contact } = req.body;
     updateSeen(username);
@@ -102,5 +90,14 @@ app.post('/mark_read', (req, res) => {
     res.status(200).json({ status: 'ok' });
 });
 
-app.get('/', (req, res) => res.send('CyberServer v5.0 (Status + Áudio) Ativo!'));
+app.post('/clear_messages', (req, res) => {
+    const { username, password } = req.body;
+    const user = users.find(u => u.username === username && u.password === password);
+    if (user) {
+        messages = messages.filter(m => m.to !== username);
+        res.status(200).json({ status: 'ok' });
+    } else res.status(401).send('Negado');
+});
+
+app.get('/', (req, res) => res.send('Premium CyberServer v6.0 Ativo!'));
 app.listen(port, () => console.log(`Servidor rodando na porta ${port}`));
