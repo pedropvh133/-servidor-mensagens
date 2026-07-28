@@ -178,9 +178,58 @@ app.post('/create_group', (req, res) => {
 app.get('/groups/:username', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.username))));
 
 app.post('/group/update_pic', (req, res) => {
-    const group = groups.find(g => g.id === req.body.groupId);
-    if (group && group.admins.includes(req.body.adminUser)) { group.profilePic = req.body.profilePic; res.status(200).json(group); }
-    else res.status(403).send('Erro');
+    const { groupId, adminUser, profilePic } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        group.profilePic = profilePic;
+        res.status(200).json(group);
+    } else res.status(403).send('Erro');
+});
+
+app.post('/group/update_name', (req, res) => {
+    const { groupId, adminUser, newName } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        group.name = newName;
+        res.status(200).json(group);
+    } else res.status(403).send('Não autorizado');
+});
+
+app.post('/group/delete', (req, res) => {
+    const { groupId, adminUser } = req.body;
+    const index = groups.findIndex(g => g.id === groupId);
+    if (index !== -1 && groups[index].admins.includes(adminUser)) {
+        groups.splice(index, 1);
+        res.status(200).json({ status: 'ok' });
+    } else res.status(403).send('Não autorizado');
+});
+
+app.post('/group/add_member', (req, res) => {
+    const { groupId, adminUser, newMember } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        if (!group.members.includes(newMember)) group.members.push(newMember);
+        res.status(200).json(group);
+    } else res.status(403).send('Erro');
+});
+
+app.post('/group/remove_member', (req, res) => {
+    const { groupId, adminUser, targetUser } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        group.members = group.members.filter(m => m !== targetUser);
+        group.admins = group.admins.filter(a => a !== targetUser);
+        res.status(200).json(group);
+    } else res.status(403).send('Erro');
+});
+
+app.post('/group/promote', (req, res) => {
+    const { groupId, adminUser, targetUser } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        if (!group.admins.includes(targetUser)) group.admins.push(targetUser);
+        res.status(200).json(group);
+    } else res.status(403).send('Erro');
 });
 
 app.get('/group/messages/:groupId', (req, res) => res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId)));
@@ -209,5 +258,5 @@ app.post('/clear_messages', (req, res) => {
     else res.status(401).send('Erro');
 });
 
-app.get('/', (req, res) => res.send('NOCTIS Blind Server v16.1 Ativo!'));
+app.get('/', (req, res) => res.send('NOCTIS Blind Server v16.2 Ativo!'));
 app.listen(port, () => console.log(`Servidor NOCTIS na porta ${port}`));
