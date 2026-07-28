@@ -8,7 +8,7 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(bodyParser.json({ limit: '30mb' }));
 
-let users = []; // [{ username, password, lastSeen, profilePic, privacyLastSeen, privacyProfilePic, privacyCalls }]
+let users = []; // [{ username, password, lastSeen, profilePic, privacyLastSeen, privacyProfilePic, privacyCalls, privacyBio }]
 let messages = [];
 let groups = [];
 let callSignals = {};
@@ -51,14 +51,16 @@ app.post('/login', (req, res) => {
     } else res.status(401).json({ error: 'SENHA_INCORRETA' });
 });
 
+// ATUALIZAÇÃO V14.0: Exige oldPassword para qualquer mudança
 app.post('/user/update_settings', (req, res) => {
     const { username, currentPassword, newUsername, newPassword, privacyLastSeen, privacyProfilePic, privacyCalls } = req.body;
     const user = users.find(u => u.username === username && u.password === currentPassword);
-    if (!user) return res.status(401).send('Credenciais inválidas');
+
+    if (!user) return res.status(401).json({ error: 'SENHA_ATUAL_INCORRETA' });
 
     if (newUsername && newUsername !== username) {
-        if (users.find(u => u.username === newUsername)) return res.status(400).send('Nome já em uso');
-        // Atualiza referências em mensagens e grupos
+        if (users.find(u => u.username === newUsername)) return res.status(400).json({ error: 'NOME_JÁ_EM_USO' });
+        // Atualiza referências
         messages.forEach(m => { if (m.from === username) m.from = newUsername; if (m.to === username) m.to = newUsername; });
         groups.forEach(g => {
             g.members = g.members.map(m => m === username ? newUsername : m);
@@ -85,45 +87,53 @@ app.post('/user/delete_account', (req, res) => {
     const index = users.findIndex(u => u.username === username && u.password === password);
     if (index !== -1) {
         users.splice(index, 1);
-        // Limpa mensagens e remove de grupos
         messages = messages.filter(m => m.from !== username && m.to !== username);
         groups.forEach(g => {
             g.members = g.members.filter(m => m !== username);
             g.admins = g.admins.filter(a => a !== username);
         });
-        res.status(200).json({ status: 'ok', message: 'Conta excluída' });
-    } else {
-        res.status(401).send('Erro ao excluir');
-    }
-});
-
-app.post('/user/update_pic', (req, res) => {
-    const { username, profilePic } = req.body;
-    const user = users.find(u => u.username === username);
-    if (user) {
-        user.profilePic = profilePic;
         res.status(200).json({ status: 'ok' });
-    } else res.status(404).send('Erro');
+    } else res.status(401).send('Erro');
 });
 
+// --- GESTÃO DE GRUPOS AVANÇADA (V14.0) ---
+app.post('/group/update_name', (req, res) => {
+    const { groupId, adminUser, newName } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        group.name = newName;
+        res.status(200).json(group);
+    } else res.status(403).send('Não autorizado');
+});
+
+app.post('/group/delete', (req, res) => {
+    const { groupId, adminUser } = req.body;
+    const index = groups.findIndex(g => g.id === groupId);
+    if (index !== -1 && groups[index].admins.includes(adminUser)) {
+        groups.splice(index, 1);
+        messages = messages.filter(m => m.to !== groupId);
+        res.status(200).json({ status: 'ok' });
+    } else res.status(403).send('Não autorizado');
+});
+
+// --- RESTO DAS ROTAS ---
 app.get('/user/info/:username', (req, res) => {
     const user = users.find(u => u.username === req.params.username);
     if (!user) return res.status(404).send('Not found');
     const canSeePic = user.privacyProfilePic === 'Todos';
-    res.json({
-        username: user.username,
-        profilePic: canSeePic ? user.profilePic : null,
-        lastSeen: user.lastSeen,
-        privacyLastSeen: user.privacyLastSeen
-    });
+    res.json({ username: user.username, profilePic: canSeePic ? user.profilePic : null, lastSeen: user.lastSeen, privacyLastSeen: user.privacyLastSeen });
+});
+
+app.post('/user/update_pic', (req, res) => {
+    const user = users.find(u => u.username === req.body.username);
+    if (user) { user.profilePic = req.body.profilePic; res.status(200).json({ status: 'ok' }); }
+    else res.status(404).send('Erro');
 });
 
 app.post('/call/signal', (req, res) => {
     const { to, from, data } = req.body;
     const targetUser = users.find(u => u.username === to);
-    if (targetUser && targetUser.privacyCalls === 'Off') {
-        return res.status(403).json({ error: 'USUÁRIO_NÃO_RECEBE_CHAMADAS' });
-    }
+    if (targetUser && targetUser.privacyCalls === 'Off') return res.status(403).json({ error: 'BLOQUEADO' });
     if (!callSignals[to]) callSignals[to] = [];
     callSignals[to].push({ from, data, time: Date.now() });
     res.status(200).json({ status: 'sent' });
@@ -196,5 +206,5 @@ app.post('/clear_messages', (req, res) => {
     else res.status(401).send('Erro');
 });
 
-app.get('/', (req, res) => res.send('NOCTIS Blind Server v13.0 Ativo!'));
+app.get('/', (req, res) => res.send('NOCTIS Blind Server v14.0 Ativo!'));
 app.listen(port, () => console.log(`Servidor NOCTIS na porta ${port}`));
