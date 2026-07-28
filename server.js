@@ -11,7 +11,7 @@ app.use(bodyParser.json({ limit: '30mb' }));
 let users = [];
 let messages = [];
 let groups = [];
-let callSignals = {}; // { username: [signals] }
+let callSignals = {};
 
 function updateSeen(username) {
     const user = users.find(u => u.username === username);
@@ -36,10 +36,26 @@ app.post('/login', (req, res) => {
     } else res.status(401).json({ error: 'SENHA_INCORRETA' });
 });
 
-// --- SISTEMA DE CHAMADA CEGA (BLIND SIGNALING) ---
+// --- POLLING GLOBAL (V11.0) ---
+app.get('/messages/unread/:username', (req, res) => {
+    const username = req.params.username;
+    updateSeen(username);
+
+    // Busca grupos que o usuário participa
+    const userGroups = groups.filter(g => g.members.includes(username)).map(g => g.id);
+
+    // Busca mensagens não lidas enviadas PARA o usuário (privado) ou PARA grupos dele
+    // Nota: Em grupos, controlamos o 'read' localmente no app por id
+    const unread = messages.filter(m =>
+        (m.to === username && !m.read && !m.isGroup) ||
+        (m.isGroup && userGroups.includes(m.to) && m.from !== username)
+    );
+
+    res.json(unread);
+});
 
 app.post('/call/signal', (req, res) => {
-    const { to, from, data } = req.body; // 'data' está criptografado pelo app
+    const { to, from, data } = req.body;
     if (!callSignals[to]) callSignals[to] = [];
     callSignals[to].push({ from, data, time: Date.now() });
     res.status(200).json({ status: 'sent' });
@@ -48,11 +64,9 @@ app.post('/call/signal', (req, res) => {
 app.get('/call/check/:username', (req, res) => {
     const username = req.params.username;
     const signals = callSignals[username] || [];
-    callSignals[username] = []; // Limpa após ler
+    callSignals[username] = [];
     res.json(signals);
 });
-
-// --- FIM SISTEMA DE CHAMADA ---
 
 app.get('/user/info/:username', (req, res) => {
     const user = users.find(u => u.username === req.params.username);
@@ -155,5 +169,5 @@ app.post('/clear_messages', (req, res) => {
     else res.status(401).send('Erro');
 });
 
-app.get('/', (req, res) => res.send('Blind CyberServer v10.0 Ativo!'));
-app.listen(port, () => console.log(`Servidor rodando na porta ${port}`));
+app.get('/', (req, res) => res.send('NEXUS Blind Server v11.0 Ativo!'));
+app.listen(port, () => console.log(`Servidor NEXUS na porta ${port}`));
