@@ -97,6 +97,15 @@ app.post('/user/delete_account', (req, res) => {
     }
 });
 
+app.post('/user/update_pic', (req, res) => {
+    const { username, profilePic } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        user.profilePic = profilePic;
+        res.status(200).json({ status: 'ok' });
+    } else res.status(404).send('Erro');
+});
+
 app.get('/user/info/:username', (req, res) => {
     const user = users.find(u => u.username === req.params.username);
     if (!user) return res.status(404).send('Not found');
