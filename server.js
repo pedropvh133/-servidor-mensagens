@@ -6,10 +6,9 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
-// Limite aumentado para 20MB para suportar fotos comprimidas e vídeos curtos
-app.use(bodyParser.json({ limit: '20mb' }));
+app.use(bodyParser.json({ limit: '30mb' })); // Limite aumentado para mídia de alta qualidade
 
-let users = []; // [{ username, password, lastSeen }]
+let users = [];
 let messages = [];
 
 function updateSeen(username) {
@@ -19,8 +18,8 @@ function updateSeen(username) {
 
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
-    if (!username || !password) return res.status(400).json({ status: 'error', message: 'Dados incompletos' });
-    if (users.find(u => u.username === username)) return res.status(400).json({ status: 'error', message: 'USUÁRIO_JÁ_REGISTRADO' });
+    if (!username || !password) return res.status(400).json({ error: 'Dados incompletos' });
+    if (users.find(u => u.username === username)) return res.status(400).json({ error: 'USUÁRIO_JÁ_EXISTE' });
     users.push({ username, password, lastSeen: Date.now() });
     res.status(201).json({ status: 'ok' });
 });
@@ -28,11 +27,11 @@ app.post('/register', (req, res) => {
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
     const user = users.find(u => u.username === username);
-    if (!user) return res.status(404).json({ status: 'error', message: 'NÃO_ENCONTRADO' });
+    if (!user) return res.status(404).json({ error: 'NÃO_ENCONTRADO' });
     if (user.password === password) {
         user.lastSeen = Date.now();
         res.status(200).json({ status: 'ok' });
-    } else res.status(401).json({ status: 'error', message: 'SENHA_INCORRETA' });
+    } else res.status(401).json({ error: 'SENHA_INCORRETA' });
 });
 
 app.get('/status/:username', (req, res) => {
@@ -59,7 +58,7 @@ app.post('/send_message', (req, res) => {
         read: false
     };
     messages.push(msg);
-    res.status(200).json({ status: 'enviada' });
+    res.status(200).json({ status: 'ok' });
 });
 
 app.get('/conversation/:user1/:user2', (req, res) => {
@@ -72,7 +71,19 @@ app.get('/conversation/:user1/:user2', (req, res) => {
     res.json(chat);
 });
 
-app.post('/destroy_message', (req, res) => {
+// NOVA ROTA: APAGAR PARA TODOS
+app.post('/delete_message', (req, res) => {
+    const { messageId, username } = req.body;
+    const index = messages.findIndex(m => m.id === messageId && m.from === username);
+    if (index !== -1) {
+        messages.splice(index, 1);
+        res.status(200).json({ status: 'ok', message: 'Apagada para todos' });
+    } else {
+        res.status(404).json({ error: 'Mensagem não encontrada ou você não é o autor' });
+    }
+});
+
+app.post('/destroy_view_once', (req, res) => {
     const { messageId, username } = req.body;
     const index = messages.findIndex(m => m.id === messageId && m.to === username);
     if (index !== -1) {
@@ -99,5 +110,5 @@ app.post('/clear_messages', (req, res) => {
     } else res.status(401).send('Negado');
 });
 
-app.get('/', (req, res) => res.send('Premium CyberServer v6.0 Ativo!'));
+app.get('/', (req, res) => res.send('Midnight CyberServer v7.0 Ativo!'));
 app.listen(port, () => console.log(`Servidor rodando na porta ${port}`));
