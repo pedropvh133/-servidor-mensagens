@@ -8,7 +8,7 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(bodyParser.json({ limit: '30mb' }));
 
-let users = []; // [{ username, password, lastSeen, profilePic, privacyLastSeen, privacyProfilePic }]
+let users = []; // [{ username, password, lastSeen, profilePic, privacyLastSeen, privacyProfilePic, privacyCalls }]
 let messages = [];
 let groups = [];
 let callSignals = {};
@@ -29,7 +29,8 @@ app.post('/register', (req, res) => {
         lastSeen: Date.now(),
         profilePic: null,
         privacyLastSeen: 'Todos',
-        privacyProfilePic: 'Todos'
+        privacyProfilePic: 'Todos',
+        privacyCalls: 'On'
     });
     res.status(201).json({ status: 'ok' });
 });
@@ -44,31 +45,61 @@ app.post('/login', (req, res) => {
             status: 'ok',
             profilePic: user.profilePic,
             privacyLastSeen: user.privacyLastSeen,
-            privacyProfilePic: user.privacyProfilePic
+            privacyProfilePic: user.privacyProfilePic,
+            privacyCalls: user.privacyCalls || 'On'
         });
     } else res.status(401).json({ error: 'SENHA_INCORRETA' });
 });
 
 app.post('/user/update_settings', (req, res) => {
-    const { username, currentPassword, newUsername, newPassword, privacyLastSeen, privacyProfilePic } = req.body;
+    const { username, currentPassword, newUsername, newPassword, privacyLastSeen, privacyProfilePic, privacyCalls } = req.body;
     const user = users.find(u => u.username === username && u.password === currentPassword);
     if (!user) return res.status(401).send('Credenciais inválidas');
 
     if (newUsername && newUsername !== username) {
         if (users.find(u => u.username === newUsername)) return res.status(400).send('Nome já em uso');
+        // Atualiza referências em mensagens e grupos
+        messages.forEach(m => { if (m.from === username) m.from = newUsername; if (m.to === username) m.to = newUsername; });
+        groups.forEach(g => {
+            g.members = g.members.map(m => m === username ? newUsername : m);
+            g.admins = g.admins.map(a => a === username ? newUsername : a);
+        });
         user.username = newUsername;
     }
     if (newPassword) user.password = newPassword;
     if (privacyLastSeen) user.privacyLastSeen = privacyLastSeen;
     if (privacyProfilePic) user.privacyProfilePic = privacyProfilePic;
+    if (privacyCalls) user.privacyCalls = privacyCalls;
 
-    res.status(200).json({ status: 'ok', user });
+    res.status(200).json({
+        status: 'ok',
+        username: user.username,
+        privacyLastSeen: user.privacyLastSeen,
+        privacyProfilePic: user.privacyProfilePic,
+        privacyCalls: user.privacyCalls
+    });
+});
+
+app.post('/user/delete_account', (req, res) => {
+    const { username, password } = req.body;
+    const index = users.findIndex(u => u.username === username && u.password === password);
+    if (index !== -1) {
+        users.splice(index, 1);
+        // Limpa mensagens e remove de grupos
+        messages = messages.filter(m => m.from !== username && m.to !== username);
+        groups.forEach(g => {
+            g.members = g.members.filter(m => m !== username);
+            g.admins = g.admins.filter(a => a !== username);
+        });
+        res.status(200).json({ status: 'ok', message: 'Conta excluída' });
+    } else {
+        res.status(401).send('Erro ao excluir');
+    }
 });
 
 app.get('/user/info/:username', (req, res) => {
     const user = users.find(u => u.username === req.params.username);
     if (!user) return res.status(404).send('Not found');
-
     const canSeePic = user.privacyProfilePic === 'Todos';
     res.json({
         username: user.username,
@@ -78,55 +109,43 @@ app.get('/user/info/:username', (req, res) => {
     });
 });
 
-app.post('/user/update_pic', (req, res) => {
-    const { username, profilePic } = req.body;
-    const user = users.find(u => u.username === username);
-    if (user) { user.profilePic = profilePic; res.status(200).json({ status: 'ok' }); }
-    else res.status(404).send('Erro');
+app.post('/call/signal', (req, res) => {
+    const { to, from, data } = req.body;
+    const targetUser = users.find(u => u.username === to);
+    if (targetUser && targetUser.privacyCalls === 'Off') {
+        return res.status(403).json({ error: 'USUÁRIO_NÃO_RECEBE_CHAMADAS' });
+    }
+    if (!callSignals[to]) callSignals[to] = [];
+    callSignals[to].push({ from, data, time: Date.now() });
+    res.status(200).json({ status: 'sent' });
+});
+
+app.get('/call/check/:username', (req, res) => {
+    const signals = callSignals[req.params.username] || [];
+    callSignals[req.params.username] = [];
+    res.json(signals);
 });
 
 app.get('/status/:username', (req, res) => {
     const user = users.find(u => u.username === req.params.username);
     if (!user) return res.json({ status: 'OFFLINE' });
-
-    const secondsAgo = (Date.now() - user.lastSeen) / 1000;
-    if (secondsAgo < 20) return res.json({ status: 'ONLINE' });
-
-    if (user.privacyLastSeen === 'Ninguém') {
-        return res.json({ status: 'OFFLINE' });
-    }
-
-    const date = new Date(user.lastSeen);
-    res.json({ status: `Visto por último ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` });
+    if ((Date.now() - user.lastSeen) / 1000 < 20) return res.json({ status: 'ONLINE' });
+    if (user.privacyLastSeen === 'Ninguém') return res.json({ status: 'OFFLINE' });
+    res.json({ status: `Visto por último ${new Date(user.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` });
 });
 
 app.post('/send_message', (req, res) => {
     const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
     updateSeen(username);
-    // Usamos timestamp numérico para o app formatar localmente
-    messages.push({
-        id: Date.now(),
-        from: username,
-        to: recipient,
-        content,
-        isAudio: isAudio || false,
-        isImage: isImage || false,
-        isVideo: isVideo || false,
-        viewOnce: viewOnce || false,
-        isGroup: isGroup || false,
-        timestamp: Date.now(), // NOVO: Timestamp real
-        read: false
-    });
+    messages.push({ id: Date.now(), from: username, to: recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false });
     res.status(200).json({ status: 'ok' });
 });
 
 app.get('/conversation/:user1/:user2', (req, res) => {
     updateSeen(req.params.user1);
-    const chat = messages.filter(m => !m.isGroup && ((m.from === req.params.user1 && m.to === req.params.user2) || (m.from === req.params.user2 && m.to === req.params.user1)));
-    res.json(chat);
+    res.json(messages.filter(m => !m.isGroup && ((m.from === req.params.user1 && m.to === req.params.user2) || (m.from === req.params.user2 && m.to === req.params.user1))));
 });
 
-// --- GRUPOS ---
 app.post('/create_group', (req, res) => {
     const { name, creator } = req.body;
     const newGroup = { id: 'group_' + Date.now(), name, members: [creator], admins: [creator], profilePic: null };
@@ -134,22 +153,16 @@ app.post('/create_group', (req, res) => {
     res.status(201).json(newGroup);
 });
 
-app.get('/groups/:username', (req, res) => {
-    res.json(groups.filter(g => g.members.includes(req.params.username)));
-});
+app.get('/groups/:username', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.username))));
 
 app.post('/group/update_pic', (req, res) => {
-    const { groupId, adminUser, profilePic } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) { group.profilePic = profilePic; res.status(200).json(group); }
+    const group = groups.find(g => g.id === req.body.groupId);
+    if (group && group.admins.includes(req.body.adminUser)) { group.profilePic = req.body.profilePic; res.status(200).json(group); }
     else res.status(403).send('Erro');
 });
 
-app.get('/group/messages/:groupId', (req, res) => {
-    res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId));
-});
+app.get('/group/messages/:groupId', (req, res) => res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId)));
 
-// --- RESTO DAS ROTAS MANTIDAS ---
 app.post('/delete_message', (req, res) => {
     const index = messages.findIndex(m => m.id === req.body.messageId && m.from === req.body.username);
     if (index !== -1) { messages.splice(index, 1); res.status(200).json({ status: 'ok' }); }
@@ -174,5 +187,5 @@ app.post('/clear_messages', (req, res) => {
     else res.status(401).send('Erro');
 });
 
-app.get('/', (req, res) => res.send('NEXUS Midnight Server v12.0 Ativo!'));
+app.get('/', (req, res) => res.send('NEXUS Blind Server v13.0 Ativo!'));
 app.listen(port, () => console.log(`Servidor NEXUS na porta ${port}`));
