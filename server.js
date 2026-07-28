@@ -74,14 +74,7 @@ app.post('/user/update_settings', (req, res) => {
     if (privacyCalls) user.privacyCalls = privacyCalls;
     if (bio !== undefined) user.bio = bio;
 
-    res.status(200).json({
-        status: 'ok',
-        username: user.username,
-        privacyLastSeen: user.privacyLastSeen,
-        privacyProfilePic: user.privacyProfilePic,
-        privacyCalls: user.privacyCalls,
-        bio: user.bio
-    });
+    res.status(200).json({ status: 'ok', user });
 });
 
 app.post('/user/delete_account', (req, res) => {
@@ -101,10 +94,8 @@ app.post('/user/delete_account', (req, res) => {
 app.post('/user/update_pic', (req, res) => {
     const { username, profilePic } = req.body;
     const user = users.find(u => u.username === username);
-    if (user) {
-        user.profilePic = profilePic;
-        res.status(200).json({ status: 'ok' });
-    } else res.status(404).send('Erro');
+    if (user) { user.profilePic = profilePic; res.status(200).json({ status: 'ok' }); }
+    else res.status(404).send('Erro');
 });
 
 app.get('/user/info/:username', (req, res) => {
@@ -120,23 +111,19 @@ app.get('/user/info/:username', (req, res) => {
     });
 });
 
-app.post('/group/update_name', (req, res) => {
-    const { groupId, adminUser, newName } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        group.name = newName;
-        res.status(200).json(group);
-    } else res.status(403).send('Não autorizado');
-});
+app.get('/messages/unread/:username', (req, res) => {
+    const username = req.params.username;
+    // Pega grupos que o usuário participa
+    const userGroups = groups.filter(g => g.members.includes(username)).map(g => g.id);
 
-app.post('/group/delete', (req, res) => {
-    const { groupId, adminUser } = req.body;
-    const index = groups.findIndex(g => g.id === groupId);
-    if (index !== -1 && groups[index].admins.includes(adminUser)) {
-        groups.splice(index, 1);
-        messages = messages.filter(m => m.to !== groupId);
-        res.status(200).json({ status: 'ok' });
-    } else res.status(403).send('Não autorizado');
+    // Filtra mensagens destinadas ao usuário ou aos grupos dele, que NÃO foram enviadas por ele e NÃO foram lidas (para PV)
+    const unread = messages.filter(m => {
+        const isToMe = !m.isGroup && m.to === username && !m.read;
+        const isToMyGroup = m.isGroup && userGroups.includes(m.to) && m.from !== username;
+        return isToMe || isToMyGroup;
+    });
+
+    res.json(unread);
 });
 
 app.post('/call/signal', (req, res) => {
@@ -215,5 +202,5 @@ app.post('/clear_messages', (req, res) => {
     else res.status(401).send('Erro');
 });
 
-app.get('/', (req, res) => res.send('NOCTIS Blind Server v15.0 Ativo!'));
+app.get('/', (req, res) => res.send('NOCTIS Blind Server v16.0 Ativo!'));
 app.listen(port, () => console.log(`Servidor NOCTIS na porta ${port}`));
