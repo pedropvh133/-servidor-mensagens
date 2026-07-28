@@ -8,45 +8,28 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(bodyParser.json());
 
-// Armazenamento em memória (limpa se o servidor reiniciar)
-let users = []; // [{ username, password }]
+let users = [];
 let messages = [];
 
-// ROTA: REGISTRO (Criar Conta)
+// ROTA: REGISTRO
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ status: 'error', message: 'Dados incompletos' });
-
-    const userExists = users.find(u => u.username === username);
-    if (userExists) {
-        return res.status(400).json({ status: 'error', message: 'USUÁRIO_JÁ_REGISTRADO' });
-    }
-
+    if (users.find(u => u.username === username)) return res.status(400).json({ status: 'error', message: 'USUÁRIO_JÁ_REGISTRADO' });
     users.push({ username, password });
-    console.log(`Novo usuário: ${username}`);
-    res.status(201).json({ status: 'ok', message: 'REGISTRO_CONCLUÍDO' });
+    res.status(201).json({ status: 'ok' });
 });
 
-// ROTA: LOGIN (Entrar)
+// ROTA: LOGIN
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
-    if (!username || !password) return res.status(400).json({ status: 'error', message: 'Dados incompletos' });
-
     const user = users.find(u => u.username === username);
-
-    if (!user) {
-        return res.status(404).json({ status: 'error', message: 'USUÁRIO_NÃO_ENCONTRADO' });
-    }
-
-    if (user.password === password) {
-        console.log(`Login: ${username}`);
-        res.status(200).json({ status: 'ok', message: 'ACESSO_PERMITIDO' });
-    } else {
-        res.status(401).json({ status: 'error', message: 'SENHA_INCORRETA' });
-    }
+    if (!user) return res.status(404).json({ status: 'error', message: 'NÃO_ENCONTRADO' });
+    if (user.password === password) res.status(200).json({ status: 'ok' });
+    else res.status(401).json({ status: 'error', message: 'SENHA_INCORRETA' });
 });
 
-// Enviar mensagem
+// ROTA: ENVIAR MENSAGEM
 app.post('/send_message', (req, res) => {
     const { username, recipient, content } = req.body;
     const msg = {
@@ -54,29 +37,43 @@ app.post('/send_message', (req, res) => {
         from: username,
         to: recipient,
         content,
-        time: new Date().toLocaleTimeString()
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        read: false
     };
     messages.push(msg);
     res.status(200).json({ status: 'enviada' });
 });
 
-// Buscar mensagens recebidas
-app.get('/messages/:username', (req, res) => {
-    const inbox = messages.filter(m => m.to === req.params.username);
-    res.json(inbox);
+// ROTA: BUSCAR CONVERSA COMPLETA (Histórico)
+app.get('/conversation/:user1/:user2', (req, res) => {
+    const { user1, user2 } = req.params;
+    const chat = messages.filter(m =>
+        (m.from === user1 && m.to === user2) ||
+        (m.from === user2 && m.to === user1)
+    );
+    res.json(chat);
+});
+
+// ROTA: MARCAR COMO LIDA
+app.post('/mark_read', (req, res) => {
+    const { username, contact } = req.body;
+    messages.forEach(m => {
+        if (m.from === contact && m.to === username) {
+            m.read = true;
+        }
+    });
+    res.status(200).json({ status: 'ok' });
 });
 
 // Limpar Caixa
 app.post('/clear_messages', (req, res) => {
     const { username, password } = req.body;
-    const user = users.find(u => u.username === username);
-    if (user && user.password === password) {
+    const user = users.find(u => u.username === username && u.password === password);
+    if (user) {
         messages = messages.filter(m => m.to !== username);
         res.status(200).json({ status: 'ok' });
-    } else {
-        res.status(401).json({ status: 'negado' });
-    }
+    } else res.status(401).send('Acesso negado');
 });
 
-app.get('/', (req, res) => res.send('CyberServer v2.0 Ativo!'));
-app.listen(port, () => console.log(`CyberServer na porta ${port}`));
+app.get('/', (req, res) => res.send('CyberServer v3.0 Ativo!'));
+app.listen(port, () => console.log(`Servidor rodando na porta ${port}`));
