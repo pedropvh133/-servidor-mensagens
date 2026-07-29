@@ -1,222 +1,220 @@
+/**
+ * NOCTIS MESSENGER - SERVER V19.0
+ * FORTALEZA NOCTIS: Firestore + Backblaze B2
+ */
+
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
+const admin = require('firebase-admin');
+const B2 = require('backblaze-b2');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
+// --- CONFIGURAÇÃO FIREBASE ---
+// Adicione o conteúdo do seu arquivo JSON de conta de serviço na variável de ambiente FIREBASE_CONFIG
+const serviceAccount = process.env.FIREBASE_CONFIG ? JSON.parse(process.env.FIREBASE_CONFIG) : null;
+
+if (serviceAccount) {
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+    });
+    console.log('Firebase Firestore Inicializado! 🔥');
+} else {
+    console.error('AVISO: FIREBASE_CONFIG não encontrada. Usando modo temporário.');
+}
+
+const db = serviceAccount ? admin.firestore() : null;
+
+// --- CONFIGURAÇÃO BACKBLAZE B2 ---
+const b2 = new B2({
+    applicationKeyId: process.env.B2_KEY_ID || 'ID_AQUI',
+    applicationKey: process.env.B2_APP_KEY || 'CHAVE_AQUI'
+});
+
+async function initB2() {
+    try {
+        await b2.authorize();
+        console.log('Backblaze B2 Autorizado! ☁️');
+    } catch (e) { console.error('Erro B2:', e.message); }
+}
+initB2();
+
 app.use(cors());
 app.use(bodyParser.json({ limit: '100mb' }));
 
-let users = []; // [{ username, password, lastSeen, profilePic, privacyLastSeen, privacyProfilePic, privacyCalls, privacyBio, bio }]
-let messages = [];
-let groups = [];
 let callSignals = {};
 
-function updateSeen(username) {
-    const user = users.find(u => u.username === username);
-    if (user) user.lastSeen = Date.now();
-}
+// --- ROTAS DE USUÁRIO ---
 
-app.post('/register', (req, res) => {
+app.post('/register', async (req, res) => {
     const { username, password } = req.body;
-    if (!username || !password) return res.status(400).json({ error: 'Dados incompletos' });
-    if (users.find(u => u.username === username)) return res.status(400).json({ error: 'USUÁRIO_JÁ_EXISTE' });
+    if (!db) return res.status(503).send('Banco offline');
 
-    users.push({
-        username,
-        password,
-        lastSeen: Date.now(),
-        profilePic: null,
-        privacyLastSeen: 'Todos',
-        privacyProfilePic: 'Todos',
-        privacyCalls: 'On',
-        bio: 'Olá! Estou usando o Noctis Messenger.'
-    });
-    res.status(201).json({ status: 'ok' });
-});
+    try {
+        const userRef = db.collection('users').doc(username);
+        const doc = await userRef.get();
+        if (doc.exists) return res.status(400).json({ error: 'USUÁRIO_JÁ_EXISTE' });
 
-app.post('/login', (req, res) => {
-    const { username, password } = req.body;
-    const user = users.find(u => u.username === username);
-    if (!user) return res.status(404).json({ error: 'NÃO_ENCONTRADO' });
-    if (user.password === password) {
-        user.lastSeen = Date.now();
-        res.status(200).json({
-            status: 'ok',
-            profilePic: user.profilePic,
-            privacyLastSeen: user.privacyLastSeen,
-            privacyProfilePic: user.privacyProfilePic,
-            privacyCalls: user.privacyCalls || 'On',
-            bio: user.bio || 'Olá! Estou usando o Noctis Messenger.'
+        await userRef.set({
+            username,
+            password,
+            bio: 'Olá! Estou usando o Noctis Messenger.',
+            profilePic: null,
+            lastSeen: Date.now(),
+            privacyLastSeen: 'Todos',
+            privacyProfilePic: 'Todos',
+            privacyCalls: 'On'
         });
-    } else res.status(401).json({ error: 'SENHA_INCORRETA' });
+        res.status(201).json({ status: 'ok' });
+    } catch (e) { res.status(500).send(e.message); }
 });
 
-app.post('/user/update_settings', (req, res) => {
+app.post('/login', async (req, res) => {
+    const { username, password } = req.body;
+    if (!db) return res.status(503).send('Banco offline');
+
+    try {
+        const userRef = db.collection('users').doc(username);
+        const doc = await userRef.get();
+        if (!doc.exists) return res.status(404).json({ error: 'NÃO_ENCONTRADO' });
+
+        const user = doc.data();
+        if (user.password === password) {
+            await userRef.update({ lastSeen: Date.now() });
+            res.status(200).json({
+                status: 'ok',
+                profilePic: user.profilePic,
+                privacyLastSeen: user.privacyLastSeen,
+                privacyProfilePic: user.privacyProfilePic,
+                privacyCalls: user.privacyCalls || 'On',
+                bio: user.bio
+            });
+        } else res.status(401).json({ error: 'SENHA_INCORRETA' });
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+app.post('/user/update_settings', async (req, res) => {
     const { username, currentPassword, oldPassword, newUsername, newPassword, privacyLastSeen, privacyProfilePic, privacyCalls, bio } = req.body;
     const pass = currentPassword || oldPassword;
-    const user = users.find(u => u.username === username && u.password === pass);
+    if (!db) return res.status(503).send('Banco offline');
 
-    if (!user) return res.status(401).json({ error: 'SENHA_ATUAL_INCORRETA' });
+    try {
+        const userRef = db.collection('users').doc(username);
+        const doc = await userRef.get();
+        if (!doc.exists || doc.data().password !== pass) return res.status(401).json({ error: 'SENHA_INCORRETA' });
 
-    if (newUsername && newUsername !== username) {
-        if (users.find(u => u.username === newUsername)) return res.status(400).json({ error: 'NOME_JÁ_EM_USO' });
-        messages.forEach(m => { if (m.from === username) m.from = newUsername; if (m.to === username) m.to = newUsername; });
-        groups.forEach(g => {
-            g.members = g.members.map(m => m === username ? newUsername : m);
-            g.admins = g.admins.map(a => a === username ? newUsername : a);
-        });
-        user.username = newUsername;
-    }
-    if (newPassword) user.password = newPassword;
-    if (privacyLastSeen) user.privacyLastSeen = privacyLastSeen;
-    if (privacyProfilePic) user.privacyProfilePic = privacyProfilePic;
-    if (privacyCalls) user.privacyCalls = privacyCalls;
-    if (bio !== undefined) user.bio = bio;
+        let updateData = { lastSeen: Date.now() };
+        if (newPassword) updateData.password = newPassword;
+        if (privacyLastSeen) updateData.privacyLastSeen = privacyLastSeen;
+        if (privacyProfilePic) updateData.privacyProfilePic = privacyProfilePic;
+        if (privacyCalls) updateData.privacyCalls = privacyCalls;
+        if (bio !== undefined) updateData.bio = bio;
 
-    res.status(200).json({
-        status: 'ok',
-        profilePic: user.profilePic,
-        privacyLastSeen: user.privacyLastSeen,
-        privacyProfilePic: user.privacyProfilePic,
-        privacyCalls: user.privacyCalls,
-        bio: user.bio
-    });
-});
+        if (newUsername && newUsername !== username) {
+            const newRef = db.collection('users').doc(newUsername);
+            const newDoc = await newRef.get();
+            if (newDoc.exists) return res.status(400).json({ error: 'NOME_JÁ_EM_USO' });
 
-app.post('/user/delete_account', (req, res) => {
-    const { username, password } = req.body;
-    const index = users.findIndex(u => u.username === username && u.password === password);
-    if (index !== -1) {
-        users.splice(index, 1);
-        messages = messages.filter(m => m.from !== username && m.to !== username);
-        groups.forEach(g => {
-            g.members = g.members.filter(m => m !== username);
-            g.admins = g.admins.filter(a => a !== username);
-        });
-        res.status(200).json({ status: 'ok' });
-    } else res.status(401).send('Erro');
-});
-
-app.post('/user/update_pic', (req, res) => {
-    const { username, profilePic } = req.body;
-    const user = users.find(u => u.username === username);
-    if (user) {
-        user.profilePic = profilePic;
-        res.status(200).json({ status: 'ok' });
-    } else res.status(404).send('Erro');
-});
-
-app.get('/user/info/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    if (!user) return res.status(404).send('Not found');
-    const canSeePic = user.privacyProfilePic === 'Todos';
-    res.json({
-        username: user.username,
-        profilePic: canSeePic ? user.profilePic : null,
-        lastSeen: user.lastSeen,
-        privacyLastSeen: user.privacyLastSeen,
-        bio: user.bio || 'Olá! Estou usando o Noctis Messenger.'
-    });
-});
-
-app.get('/messages/unread/:username', (req, res) => {
-    const username = req.params.username;
-    const userGroups = groups.filter(g => g.members.includes(username)).map(g => g.id);
-    const unread = messages.filter(m => {
-        const isToMe = !m.isGroup && m.to === username && !m.read;
-        const isToMyGroup = m.isGroup && userGroups.includes(m.to) && m.from !== username;
-        return isToMe || isToMyGroup;
-    });
-    res.json(unread);
-});
-
-// --- GRUPOS AVANÇADOS V17.0 ---
-app.post('/create_group', (req, res) => {
-    const { name, creator } = req.body;
-    const newGroup = { id: 'group_' + Date.now(), name, members: [creator], admins: [creator], profilePic: null };
-    groups.push(newGroup);
-    res.status(201).json(newGroup);
-});
-
-app.get('/groups/:username', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.username))));
-
-app.post('/group/update_pic', (req, res) => {
-    const { groupId, adminUser, profilePic } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        group.profilePic = profilePic;
-        res.status(200).json(group);
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/update_name', (req, res) => {
-    const { groupId, adminUser, newName } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        group.name = newName;
-        res.status(200).json(group);
-    } else res.status(403).send('Não autorizado');
-});
-
-app.post('/group/delete', (req, res) => {
-    const { groupId, adminUser } = req.body;
-    const index = groups.findIndex(g => g.id === groupId);
-    if (index !== -1 && groups[index].admins.includes(adminUser)) {
-        groups.splice(index, 1);
-        res.status(200).json({ status: 'ok' });
-    } else res.status(403).send('Não autorizado');
-});
-
-app.post('/group/add_member', (req, res) => {
-    const { groupId, adminUser, newMember } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        if (!group.members.includes(newMember)) group.members.push(newMember);
-        res.status(200).json(group);
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/remove_member', (req, res) => {
-    const { groupId, adminUser, targetUser } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        group.members = group.members.filter(m => m !== targetUser);
-        group.admins = group.admins.filter(a => a !== targetUser);
-        res.status(200).json(group);
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/promote', (req, res) => {
-    const { groupId, adminUser, targetUser } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        if (!group.admins.includes(targetUser)) group.admins.push(targetUser);
-        res.status(200).json(group);
-    } else res.status(403).send('Erro');
-});
-
-// --- CHAMADAS COLETIVAS V17.0 ---
-app.post('/call/signal', (req, res) => {
-    const { to, from, data } = req.body;
-
-    if (to.startsWith('group_')) {
-        const group = groups.find(g => g.id === to);
-        if (group) {
-            group.members.forEach(member => {
-                if (member !== from) {
-                    if (!callSignals[member]) callSignals[member] = [];
-                    callSignals[member].push({ from, groupName: group.name, data, time: Date.now() });
-                }
-            });
-            return res.status(200).json({ status: 'sent_to_group' });
+            const fullData = { ...doc.data(), ...updateData, username: newUsername };
+            await newRef.set(fullData);
+            await userRef.delete();
+            // Nota: Em um sistema real, seria necessário atualizar referências em mensagens e grupos aqui.
+            return res.status(200).json({ status: 'ok', username: newUsername });
         }
-        return res.status(404).send('Grupo não encontrado');
-    }
 
-    const targetUser = users.find(u => u.username === to);
-    if (targetUser && targetUser.privacyCalls === 'Off') return res.status(403).json({ error: 'BLOQUEADO' });
+        await userRef.update(updateData);
+        res.status(200).json({ status: 'ok' });
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+// --- ROTAS DE MENSAGENS ---
+
+app.post('/send_message', async (req, res) => {
+    const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
+    if (!db) return res.status(503).send('Banco offline');
+
+    try {
+        let finalContent = content;
+
+        // Se for mídia pesada, poderíamos fazer o upload para o B2 aqui no futuro.
+        // Por enquanto, mantemos o Base64 no Firestore (Limite 1MB por doc) ou links externos.
+
+        const msgData = {
+            from: username,
+            to: recipient,
+            content: finalContent,
+            isAudio,
+            isImage,
+            isVideo,
+            viewOnce,
+            isGroup,
+            timestamp: Date.now(),
+            read: false
+        };
+
+        await db.collection('messages').add(msgData);
+        await db.collection('users').doc(username).update({ lastSeen: Date.now() });
+        res.status(200).json({ status: 'ok' });
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+app.get('/conversation/:u1/:u2', async (req, res) => {
+    if (!db) return res.json([]);
+    try {
+        const snapshot = await db.collection('messages')
+            .where('isGroup', '==', false)
+            .where('timestamp', '>', Date.now() - (7 * 24 * 60 * 60 * 1000)) // Últimos 7 dias
+            .get();
+
+        const msgs = snapshot.docs
+            .map(doc => doc.data())
+            .filter(m => (m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1))
+            .sort((a, b) => a.timestamp - b.timestamp);
+
+        res.json(msgs);
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+app.get('/messages/unread/:username', async (req, res) => {
+    if (!db) return res.json([]);
+    try {
+        const username = req.params.username;
+        const snapshot = await db.collection('messages')
+            .where('to', '==', username)
+            .where('read', '==', false)
+            .get();
+
+        // Adicionar lógica de grupos se necessário
+        res.json(snapshot.docs.map(doc => doc.data()));
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+// --- GRUPOS ---
+
+app.post('/create_group', async (req, res) => {
+    const { name, creator } = req.body;
+    const groupId = 'group_' + Date.now();
+    try {
+        const newGroup = { id: groupId, name, creator, members: [creator], admins: [creator], profilePic: null };
+        await db.collection('groups').doc(groupId).set(newGroup);
+        res.status(201).json(newGroup);
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+app.get('/groups/:username', async (req, res) => {
+    if (!db) return res.json([]);
+    try {
+        const snapshot = await db.collection('groups').where('members', 'array-contains', req.params.username).get();
+        res.json(snapshot.docs.map(doc => doc.data()));
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+// --- CHAMADAS E STATUS ---
+
+app.post('/call/signal', async (req, res) => {
+    const { to, from, data } = req.body;
     if (!callSignals[to]) callSignals[to] = [];
     callSignals[to].push({ from, data, time: Date.now() });
     res.status(200).json({ status: 'sent' });
@@ -228,44 +226,15 @@ app.get('/call/check/:username', (req, res) => {
     res.json(signals);
 });
 
-// --- MENSAGENS ---
-app.post('/send_message', (req, res) => {
-    const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
-    updateSeen(username);
-    messages.push({ id: Date.now(), from: username, to: recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false });
-    res.status(200).json({ status: 'ok' });
+app.get('/status/:username', async (req, res) => {
+    try {
+        const doc = await db.collection('users').doc(req.params.username).get();
+        if (!doc.exists) return res.json({ status: 'OFFLINE' });
+        const user = doc.data();
+        const online = (Date.now() - user.lastSeen) / 1000 < 40;
+        res.json({ status: online ? 'ONLINE' : 'OFFLINE' });
+    } catch (e) { res.json({ status: 'ERRO' }); }
 });
 
-app.get('/conversation/:user1/:user2', (req, res) => {
-    updateSeen(req.params.user1);
-    res.json(messages.filter(m => !m.isGroup && ((m.from === req.params.user1 && m.to === req.params.user2) || (m.from === req.params.user2 && m.to === req.params.user1))));
-});
-
-app.get('/group/messages/:groupId', (req, res) => res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId)));
-
-app.post('/delete_message', (req, res) => {
-    const index = messages.findIndex(m => m.id === req.body.messageId && m.from === req.body.username);
-    if (index !== -1) { messages.splice(index, 1); res.status(200).json({ status: 'ok' }); }
-    else res.status(404).send('Erro');
-});
-
-app.post('/destroy_view_once', (req, res) => {
-    const index = messages.findIndex(m => m.id === req.body.messageId && m.to === req.body.username);
-    if (index !== -1) { messages.splice(index, 1); res.status(200).json({ status: 'ok' }); }
-    else res.status(404).send('Erro');
-});
-
-app.post('/mark_read', (req, res) => {
-    updateSeen(req.body.username);
-    messages.forEach(m => { if (m.from === req.body.contact && m.to === req.body.username) m.read = true; });
-    res.status(200).json({ status: 'ok' });
-});
-
-app.post('/clear_messages', (req, res) => {
-    const user = users.find(u => u.username === req.body.username && u.password === req.body.password);
-    if (user) { messages = messages.filter(m => m.to !== req.body.username); res.status(200).json({ status: 'ok' }); }
-    else res.status(401).send('Erro');
-});
-
-app.get('/', (req, res) => res.send('NOCTIS Blind Server v17.0 Ativo!'));
-app.listen(port, () => console.log(`Servidor NOCTIS na porta ${port}`));
+app.get('/', (req, res) => res.send('NOCTIS Galaxy Server v19.0 Ativo! 🌌'));
+app.listen(port, () => console.log(`Servidor na porta ${port}`));
