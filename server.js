@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.15 (COMPLETE GROUP ENGINE)
- * ESTABILIZAÇÃO: Restauração definitiva de todas as funções de Grupo.
+ * NOCTIS MESSENGER - SERVER V20.16 (GROUP MANAGEMENT)
+ * ESTABILIZAÇÃO: Restauração de todas as funções (Remover Membro, Promover ADM).
  */
 
 const express = require('express');
@@ -40,14 +40,13 @@ const B2_BUCKET_ID = process.env.B2_BUCKET_ID;
 async function loadDataFromBackup() {
     if (!db) return;
     try {
-        console.log('Ressuscitando dados... ⏳');
         const userSnap = await db.collection('users').get();
         users = userSnap.docs.map(d => d.data());
 
         const groupSnap = await db.collection('groups').get();
         groups = groupSnap.docs.map(d => d.data());
 
-        const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(2000).get();
+        const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(1000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
         backupInfo = `${users.length} usuários e ${groups.length} grupos recuperados. ✅`;
     } catch (e) { backupInfo = "Erro no backup. ⚠️"; }
@@ -152,6 +151,27 @@ app.post('/group/add_member', (req, res) => {
 
         res.status(200).json(group);
         if (db) db.collection('groups').doc(groupId).update({ members: group.members });
+    } else res.status(403).send('Não autorizado');
+});
+
+app.post('/group/remove_member', (req, res) => {
+    const { groupId, adminUser, targetUser } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        group.members = group.members.filter(m => m !== targetUser);
+        group.admins = group.admins.filter(a => a !== targetUser);
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({ members: group.members, admins: group.admins });
+    } else res.status(403).send('Não autorizado');
+});
+
+app.post('/group/promote', (req, res) => {
+    const { groupId, adminUser, targetUser } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        if (!group.admins.includes(targetUser)) group.admins.push(targetUser);
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({ admins: group.admins });
     } else res.status(403).send('Não autorizado');
 });
 
@@ -317,7 +337,7 @@ app.get('/user/info/:username', (req, res) => {
 app.get('/', (req, res) => {
     res.send(`
         <body style="background: #0B0E14; color: white; font-family: sans-serif; padding: 40px;">
-            <h1>🛰️ NOCTIS Hybrid Server v20.15</h1>
+            <h1>🛰️ NOCTIS Hybrid Server v20.16</h1>
             <div style="background: #1E293B; padding: 20px; border-radius: 10px; border: 1px solid #00D2FF;">
                 <p><b>Google Firebase:</b> ${firebaseStatus}</p>
                 <p><b>Persistência:</b> ${backupInfo}</p>
@@ -327,4 +347,4 @@ app.get('/', (req, res) => {
     `);
 });
 
-app.listen(port, () => console.log(`Noctis v20.15 pronto.`));
+app.listen(port, () => console.log(`Noctis pronto.`));
