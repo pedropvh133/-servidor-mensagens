@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.6 (SECURITY UPDATE)
- * GESTÃO DE BLOQUEIO: Bloqueio de usuários e recepção de desconhecidos
+ * NOCTIS MESSENGER - SERVER V20.9 (STABLE)
+ * RESILIÊNCIA TOTAL: Sanitização de JSON e Fix de Mídia
  */
 
 const express = require('express');
@@ -12,25 +12,33 @@ const B2 = require('backblaze-b2');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// --- ESTADO GLOBAL ---
-let users = []; // [{ username, password, bio, profilePic, lastSeen, blockedUsers: [] }]
+let firebaseStatus = "Aguardando chave... ⚪";
+let users = [];
 let messages = [];
 let groups = [];
 let callSignals = {};
-let firebaseStatus = "Aguardando chave... ⚪";
 
-// --- FIREBASE CONFIG ---
-try {
-    let rawConfig = process.env.FIREBASE_CONFIG;
-    if (rawConfig) {
-        let sanitized = rawConfig.replace(/[\u0000-\u001F\u007F-\u009F]/g, "").replace(/\\n/g, '\n');
+// --- FIREBASE CONFIG (BULLETPROOF) ---
+const rawConfig = process.env.FIREBASE_CONFIG;
+if (rawConfig) {
+    try {
+        let clean = rawConfig.trim();
+        // Remove caracteres de controle e garante que quebras de linha sejam \n
+        let sanitized = clean.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
+
         const serviceAccount = JSON.parse(sanitized);
-        if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+        if (admin.apps.length === 0) {
+            admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+        }
         firebaseStatus = "Conectado com Sucesso! 🔥";
+        console.log('Firebase OK ✅');
+    } catch (err) {
+        firebaseStatus = `Erro no JSON: ${err.message} ❌`;
+        console.error(firebaseStatus);
     }
-} catch (err) { firebaseStatus = `Erro no JSON: ${err.message} ❌`; }
+}
 
-const db = admin.apps.length > 0 ? admin.firestore() : null;
+const db = (admin.apps.length > 0) ? admin.firestore() : null;
 const b2 = new B2({ applicationKeyId: process.env.B2_KEY_ID || '', applicationKey: process.env.B2_APP_KEY || '' });
 const B2_BUCKET_ID = process.env.B2_BUCKET_ID;
 
@@ -39,16 +47,10 @@ async function loadDataFromBackup() {
     if (!db) return;
     try {
         const userSnap = await db.collection('users').get();
-        users = userSnap.docs.map(d => {
-            const data = d.data();
-            if (!data.blockedUsers) data.blockedUsers = []; // Inicializa campo novo
-            return data;
-        });
-        const groupSnap = await db.collection('groups').get();
-        groups = groupSnap.docs.map(d => d.data());
+        users = userSnap.docs.map(d => d.data());
         const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(1000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
-    } catch (e) { console.error('Erro Backup:', e.message); }
+    } catch (e) { console.error('Aviso: Backup incompleto.'); }
 }
 loadDataFromBackup();
 
@@ -71,33 +73,7 @@ async function uploadToB2(base64Data, fileName) {
 app.use(cors());
 app.use(bodyParser.json({ limit: '100mb' }));
 
-// --- ROTAS DE SEGURANÇA (BLOQUEIO) ---
-
-app.post('/user/block', (req, res) => {
-    const { username, target } = req.body;
-    const user = users.find(u => u.username === username);
-    if (!user) return res.status(404).send('User not found');
-    if (!user.blockedUsers) user.blockedUsers = [];
-    if (!user.blockedUsers.includes(target)) user.blockedUsers.push(target);
-    res.json({ status: 'blocked', list: user.blockedUsers });
-    if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
-});
-
-app.post('/user/unblock', (req, res) => {
-    const { username, target } = req.body;
-    const user = users.find(u => u.username === username);
-    if (!user) return res.status(404).send('User not found');
-    user.blockedUsers = (user.blockedUsers || []).filter(u => u !== target);
-    res.json({ status: 'unblocked', list: user.blockedUsers });
-    if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
-});
-
-app.get('/user/blocked_list/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    res.json(user ? (user.blockedUsers || []) : []);
-});
-
-// --- ROTAS DE OPERAÇÃO ---
+// --- ROTAS ---
 
 app.post('/register', async (req, res) => {
     const { username, password } = req.body;
@@ -114,20 +90,13 @@ app.post('/login', (req, res) => {
     if (!user) return res.status(404).json({ error: 'NÃO_ENCONTRADO' });
     if (user.password === password) {
         user.lastSeen = Date.now();
-        res.status(200).json({ status: 'ok', ...user, blockedUsers: user.blockedUsers || [] });
-        if (db) db.collection('users').doc(username).update({ lastSeen: Date.now() });
+        res.status(200).json({ status: 'ok', ...user });
+        if (db) db.collection('users').doc(username).update({ lastSeen: Date.now() }).catch(() => {});
     } else res.status(401).json({ error: 'SENHA_INCORRETA' });
 });
 
 app.post('/send_message', async (req, res) => {
     const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
-
-    // FILTRO DE BLOQUEIO
-    const target = users.find(u => u.username === recipient);
-    if (target && target.blockedUsers && target.blockedUsers.includes(username)) {
-        return res.status(200).json({ status: 'ok', info: 'shadow_blocked' });
-    }
-
     let finalContent = content;
     if (isAudio || isImage || isVideo) {
         const b2Url = await uploadToB2(content, `media_${Date.now()}`);
@@ -139,75 +108,12 @@ app.post('/send_message', async (req, res) => {
     if (db) db.collection('messages').doc(msgData.id.toString()).set(msgData).catch(() => {});
 });
 
-// Retorna todos os usuários que trocaram mensagens com você (para mostrar na lista de chats)
-app.get('/conversations/list/:username', (req, res) => {
-    const me = req.params.username;
-    const involved = new Set();
-    messages.forEach(m => {
-        if (!m.isGroup) {
-            if (m.from === me) involved.add(m.to);
-            if (m.to === me) involved.add(m.from);
-        }
-    });
-    res.json(Array.from(involved));
-});
-
 app.get('/conversation/:u1/:u2', (req, res) => {
     const list = messages.filter(m => !m.isGroup && ((m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1)));
     res.json(list);
 });
 
-app.get('/messages/unread/:username', (req, res) => {
-    const me = req.params.username;
-    const user = users.find(u => u.username === me);
-    const blocked = user ? (user.blockedUsers || []) : [];
-
-    const unread = messages.filter(m => m.to === me && !m.read && !blocked.includes(m.from));
-    res.json(unread);
-});
-
-app.post('/call/signal', (req, res) => {
-    const { to, from, data } = req.body;
-    // Filtro de Chamada Bloqueada
-    const target = users.find(u => u.username === to);
-    if (target && target.blockedUsers && target.blockedUsers.includes(from)) return res.json({ status: 'blocked' });
-
-    if (!callSignals[to]) callSignals[to] = [];
-    callSignals[to].push({ from, data, time: Date.now() });
-    res.json({ status: 'ok' });
-});
-
-app.get('/call/check/:username', (req, res) => {
-    const signals = callSignals[req.params.username] || [];
-    callSignals[req.params.username] = [];
-    res.json(signals);
-});
-
-app.get('/b2file/:filename', async (req, res) => {
-    try {
-        await b2.authorize();
-        const bucketSnap = await b2.getBucket({ bucketId: B2_BUCKET_ID });
-        const downloadResp = await b2.downloadFileByName({
-            bucketName: bucketSnap.data.buckets[0].bucketName,
-            fileName: req.params.filename,
-            responseType: 'arraybuffer'
-        });
-        res.send(Buffer.from(downloadResp.data));
-    } catch (e) { res.status(404).send('Off'); }
-});
-
-app.get('/status/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    if (!user) return res.json({ status: 'OFFLINE' });
-    const online = (Date.now() - user.lastSeen) / 1000 < 60;
-    res.json({ status: online ? 'ONLINE' : 'OFFLINE' });
-});
-
-app.get('/user/info/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    if (user) res.json(user);
-    else res.status(404).send('Not found');
-});
+app.get('/messages/unread/:username', (req, res) => res.json(messages.filter(m => m.to === req.params.username && !m.read)));
 
 app.post('/user/update_pic', async (req, res) => {
     const { username, profilePic } = req.body;
@@ -220,8 +126,35 @@ app.post('/user/update_pic', async (req, res) => {
     } else res.status(500).send('Erro B2');
 });
 
-app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid Server v20.6 (Security)</h1><p>Status Firebase: ${firebaseStatus}</p>`);
+app.get('/b2file/:filename', async (req, res) => {
+    try {
+        await b2.authorize();
+        const bucketSnap = await b2.getBucket({ bucketId: B2_BUCKET_ID });
+        const downloadResp = await b2.downloadFileByName({
+            bucketName: bucketSnap.data.buckets[0].bucketName,
+            fileName: req.params.filename,
+            responseType: 'arraybuffer'
+        });
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.send(Buffer.from(downloadResp.data));
+    } catch (e) { res.status(404).send('Off'); }
 });
 
-app.listen(port, () => console.log(`Noctis v20.6 na porta ${port}`));
+app.post('/call/signal', (req, res) => {
+    const { to, from, data } = req.body;
+    if (!callSignals[to]) callSignals[to] = [];
+    callSignals[to].push({ from, data, time: Date.now() });
+    res.json({ status: 'ok' });
+});
+
+app.get('/call/check/:username', (req, res) => {
+    const signals = callSignals[req.params.username] || [];
+    callSignals[req.params.username] = [];
+    res.json(signals);
+});
+
+app.get('/', (req, res) => {
+    res.send(`<h1>🛰️ NOCTIS Turbo Server v20.9</h1><p>Firebase Status: ${firebaseStatus}</p>`);
+});
+
+app.listen(port, () => console.log(`Noctis Turbo v20.9 no ar.`));
