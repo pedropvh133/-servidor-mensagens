@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V19.4
- * ESTABILIZAÇÃO FINAL: Correção de busca e upload de mídia
+ * NOCTIS MESSENGER - SERVER V20.0 (TURBO)
+ * ARQUITETURA HÍBRIDA: RAM para Operação + Firebase para Backup
  */
 
 const express = require('express');
@@ -12,154 +12,159 @@ const B2 = require('backblaze-b2');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// --- FIREBASE ---
-const firebaseConfig = process.env.FIREBASE_CONFIG ? JSON.parse(process.env.FIREBASE_CONFIG) : null;
+// --- MEMÓRIA RAM (CACHE ATIVO) ---
+let users = [];
+let messages = [];
+let groups = [];
+let callSignals = {};
+
+// --- FIREBASE CONFIG ---
+const firebaseConfig = process.env.FIREBASE_CONFIG ? JSON.parse(process.env.FIREBASE_CONFIG.replace(/\\n/g, '\n')) : null;
 if (firebaseConfig) {
-    if (admin.apps.length === 0) {
-        admin.initializeApp({ credential: admin.credential.cert(firebaseConfig) });
-    }
-    console.log('Firebase Inicializado! 🔥');
+    if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.cert(firebaseConfig) });
+    console.log('Firebase Backup Ativo! 🔥');
 }
 const db = firebaseConfig ? admin.firestore() : null;
 
 // --- BACKBLAZE B2 ---
-const b2 = new B2({
-    applicationKeyId: process.env.B2_KEY_ID,
-    applicationKey: process.env.B2_APP_KEY
-});
+const b2 = new B2({ applicationKeyId: process.env.B2_KEY_ID || '', applicationKey: process.env.B2_APP_KEY || '' });
 const B2_BUCKET_ID = process.env.B2_BUCKET_ID;
 
+// --- CARREGAMENTO DE BACKUP (RESSURREIÇÃO) ---
+async function loadDataFromBackup() {
+    if (!db) return;
+    try {
+        console.log('Iniciando Ressurreição de Dados... ⏳');
+
+        // Carrega Usuários
+        const userSnap = await db.collection('users').get();
+        users = userSnap.docs.map(d => d.data());
+
+        // Carrega Grupos
+        const groupSnap = await db.collection('groups').get();
+        groups = groupSnap.docs.map(d => d.data());
+
+        // Carrega Mensagens (Últimas 5000 para economizar RAM e Leituras)
+        const msgSnap = await db.collection('messages')
+            .orderBy('timestamp', 'desc')
+            .limit(5000)
+            .get();
+        messages = msgSnap.docs.map(d => d.data()).reverse();
+
+        console.log(`Ressurreição Concluída! ${users.length} usuários e ${messages.length} mensagens carregadas. ✅`);
+    } catch (e) { console.error('Erro na Ressurreição:', e.message); }
+}
+
+// Inicia o carregamento em segundo plano
+loadDataFromBackup();
+
+// --- LOGICA DE MIDIA ---
 async function uploadToB2(base64Data, fileName) {
-    if (!B2_BUCKET_ID) {
-        console.error('ERRO: B2_BUCKET_ID não configurado!');
-        return null;
-    }
+    if (!B2_BUCKET_ID) return null;
     try {
         await b2.authorize();
         const uploadUrlResp = await b2.getUploadUrl({ bucketId: B2_BUCKET_ID });
-        const buffer = Buffer.from(base64Data, 'base64');
         const uploadResp = await b2.uploadFile({
             uploadUrl: uploadUrlResp.data.uploadUrl,
             uploadAuthToken: uploadUrlResp.data.authorizationToken,
             fileName: fileName,
-            data: buffer
+            data: Buffer.from(base64Data, 'base64')
         });
-        console.log(`Mídia salva no Backblaze: ${fileName} ✅`);
         return `B2_URL:${uploadResp.data.fileName}`;
-    } catch (e) {
-        console.error('Erro no upload B2:', e.message);
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
 app.use(cors());
 app.use(bodyParser.json({ limit: '100mb' }));
 
-let callSignals = {};
-
-// --- ROTAS ---
+// --- ROTAS TURBO (LEITURA EM RAM) ---
 
 app.post('/register', async (req, res) => {
     const { username, password } = req.body;
-    if (!db) return res.status(503).send('Servidor em manutenção');
-    try {
-        const userRef = db.collection('users').doc(username);
-        const doc = await userRef.get();
-        if (doc.exists) return res.status(400).json({ error: 'USUÁRIO_JÁ_EXISTE' });
-        await userRef.set({ username, password, bio: 'Olá!', profilePic: null, lastSeen: Date.now(), privacyLastSeen: 'Todos', privacyProfilePic: 'Todos', privacyCalls: 'On' });
-        res.status(201).json({ status: 'ok' });
-    } catch (e) { res.status(500).send(e.message); }
+    if (users.find(u => u.username === username)) return res.status(400).json({ error: 'USUÁRIO_JÁ_EXISTE' });
+
+    const newUser = { username, password, bio: 'Olá!', profilePic: null, lastSeen: Date.now(), privacyLastSeen: 'Todos', privacyProfilePic: 'Todos', privacyCalls: 'On' };
+    users.push(newUser);
+    res.status(201).json({ status: 'ok' });
+
+    // Backup em silêncio
+    if (db) db.collection('users').doc(username).set(newUser).catch(console.error);
 });
 
-app.post('/login', async (req, res) => {
+app.post('/login', (req, res) => {
     const { username, password } = req.body;
-    try {
-        const doc = await db.collection('users').doc(username).get();
-        if (!doc.exists) return res.status(404).json({ error: 'NÃO_ENCONTRADO' });
-        const user = doc.data();
-        if (user.password === password) {
-            await db.collection('users').doc(username).update({ lastSeen: Date.now() });
-            res.status(200).json({ status: 'ok', ...user });
-        } else res.status(401).json({ error: 'SENHA_INCORRETA' });
-    } catch (e) { res.status(500).send(e.message); }
+    const user = users.find(u => u.username === username);
+    if (!user) return res.status(404).json({ error: 'NÃO_ENCONTRADO' });
+    if (user.password === password) {
+        user.lastSeen = Date.now();
+        res.status(200).json({ status: 'ok', ...user });
+        if (db) db.collection('users').doc(username).update({ lastSeen: Date.now() });
+    } else res.status(401).json({ error: 'SENHA_INCORRETA' });
 });
 
 app.post('/send_message', async (req, res) => {
     const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
-    try {
-        let finalContent = content;
-        if (isAudio || isImage || isVideo) {
-            const fileName = `media_${Date.now()}_${username}`;
-            const b2Url = await uploadToB2(content, fileName);
-            if (b2Url) finalContent = b2Url;
-            else return res.status(500).send('Erro no processamento da mídia');
-        }
-        const msgId = Date.now();
-        const msgData = { id: msgId, from: username, to: recipient, content: finalContent, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: msgId, read: false };
-        await db.collection('messages').doc(msgId.toString()).set(msgData);
-        await db.collection('users').doc(username).update({ lastSeen: Date.now() });
-        res.status(200).json({ status: 'ok' });
-    } catch (e) { res.status(500).send(e.message); }
+    let finalContent = content;
+
+    // Upload B2 se for mídia
+    if (isAudio || isImage || isVideo) {
+        const b2Url = await uploadToB2(content, `media_${Date.now()}_${username}`);
+        if (b2Url) finalContent = b2Url;
+    }
+
+    const msgData = {
+        id: Date.now(), from: username, to: recipient, content: finalContent,
+        isAudio, isImage, isVideo, viewOnce, isGroup,
+        timestamp: Date.now(), read: false
+    };
+
+    messages.push(msgData);
+    if (messages.length > 10000) messages.shift(); // Mantém 10k mensagens na RAM
+
+    res.status(200).json({ status: 'ok' });
+
+    // Backup Firestore
+    if (db) db.collection('messages').doc(msgData.id.toString()).set(msgData).catch(console.error);
+    const user = users.find(u => u.username === username);
+    if (user) user.lastSeen = Date.now();
 });
 
-app.get('/conversation/:u1/:u2', async (req, res) => {
-    try {
-        // Busca simplificada para evitar erro de índice no Firestore
-        const snap = await db.collection('messages').get();
-        const msgs = snap.docs.map(d => d.data())
-            .filter(m => !m.isGroup && ((m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1)))
-            .sort((a, b) => a.timestamp - b.timestamp);
-        res.json(msgs);
-    } catch (e) { res.status(500).send(e.message); }
+app.get('/conversation/:u1/:u2', (req, res) => {
+    const list = messages.filter(m => !m.isGroup && ((m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1)));
+    res.json(list);
 });
 
-app.post('/user/delete_account', async (req, res) => {
-    const { username, password } = req.body;
-    try {
-        const userRef = db.collection('users').doc(username);
-        const doc = await userRef.get();
-        if (doc.exists && doc.data().password === password) {
-            await userRef.delete();
-            res.status(200).json({ status: 'ok' });
-        } else res.status(401).send('Não autorizado');
-    } catch (e) { res.status(500).send(e.message); }
+app.get('/messages/unread/:username', (req, res) => {
+    const unread = messages.filter(m => m.to === req.params.username && !m.read);
+    res.json(unread);
 });
 
 app.post('/user/update_pic', async (req, res) => {
     const { username, profilePic } = req.body;
-    try {
-        const fileName = `profile_${username}_${Date.now()}`;
-        const b2Url = await uploadToB2(profilePic, fileName);
-        if (b2Url) {
-            await db.collection('users').doc(username).update({ profilePic: b2Url });
-            res.status(200).json({ status: 'ok' });
-        } else res.status(500).send('Falha no upload');
-    } catch (e) { res.status(500).send(e.message); }
+    const b2Url = await uploadToB2(profilePic, `profile_${username}_${Date.now()}`);
+    if (b2Url) {
+        const user = users.find(u => u.username === username);
+        if (user) user.profilePic = b2Url;
+        res.status(200).json({ status: 'ok' });
+        if (db) db.collection('users').doc(username).update({ profilePic: b2Url });
+    } else res.status(500).send('Erro B2');
 });
 
+// --- OUTRAS ROTAS ---
 app.get('/b2file/:filename', async (req, res) => {
     try {
         await b2.authorize();
         const bucketSnap = await b2.getBucket({ bucketId: B2_BUCKET_ID });
-        const bucketName = bucketSnap.data.buckets[0].bucketName;
         const downloadResp = await b2.downloadFileByName({
-            bucketName: bucketName,
+            bucketName: bucketSnap.data.buckets[0].bucketName,
             fileName: req.params.filename,
             responseType: 'arraybuffer'
         });
         res.send(Buffer.from(downloadResp.data));
-    } catch (e) { res.status(404).send('Not found'); }
+    } catch (e) { res.status(404).send('Off'); }
 });
 
-app.get('/user/info/:username', async (req, res) => {
-    try {
-        const doc = await db.collection('users').doc(req.params.username).get();
-        if (!doc.exists) return res.status(404).send('Not found');
-        res.json(doc.data());
-    } catch (e) { res.status(500).send(e.message); }
-});
-
-app.post('/call/signal', async (req, res) => {
+app.post('/call/signal', (req, res) => {
     const { to, from, data } = req.body;
     if (!callSignals[to]) callSignals[to] = [];
     callSignals[to].push({ from, data, time: Date.now() });
@@ -172,14 +177,18 @@ app.get('/call/check/:username', (req, res) => {
     res.json(signals);
 });
 
-app.get('/status/:username', async (req, res) => {
-    try {
-        const doc = await db.collection('users').doc(req.params.username).get();
-        if (!doc.exists) return res.json({ status: 'OFFLINE' });
-        const online = (Date.now() - doc.data().lastSeen) / 1000 < 45;
-        res.json({ status: online ? 'ONLINE' : 'OFFLINE' });
-    } catch (e) { res.json({ status: 'OFFLINE' }); }
+app.get('/user/info/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    if (user) res.json(user);
+    else res.status(404).send('Not found');
 });
 
-app.get('/', (req, res) => res.send('NOCTIS Galaxy Server v19.4 Ativo! 🌌🚀'));
+app.get('/status/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    if (!user) return res.json({ status: 'OFFLINE' });
+    const online = (Date.now() - user.lastSeen) / 1000 < 60;
+    res.json({ status: online ? 'ONLINE' : 'OFFLINE' });
+});
+
+app.get('/', (req, res) => res.send('NOCTIS Turbo Server v20.0 Ativo! ⚡🌌'));
 app.listen(port, () => console.log(`Rodando na porta ${port}`));
