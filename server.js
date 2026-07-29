@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.9 (STABLE)
- * RESILIÊNCIA TOTAL: Sanitização de JSON e Fix de Mídia
+ * NOCTIS MESSENGER - SERVER V20.10 (ELITE DATA DELIVERY)
+ * OTIMIZAÇÃO: Entrega de lista de contatos completa com fotos em uma única chamada.
  */
 
 const express = require('express');
@@ -12,30 +12,24 @@ const B2 = require('backblaze-b2');
 const app = express();
 const port = process.env.PORT || 3000;
 
-let firebaseStatus = "Aguardando chave... ⚪";
+// --- ESTADO GLOBAL ---
 let users = [];
 let messages = [];
 let groups = [];
 let callSignals = {};
+let firebaseStatus = "Aguardando chave... ⚪";
+let backupInfo = "Iniciando...";
 
-// --- FIREBASE CONFIG (BULLETPROOF) ---
+// --- FIREBASE CONFIG ---
 const rawConfig = process.env.FIREBASE_CONFIG;
 if (rawConfig) {
     try {
         let clean = rawConfig.trim();
-        // Remove caracteres de controle e garante que quebras de linha sejam \n
-        let sanitized = clean.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
-
+        let sanitized = clean.replace(/[\u0000-\u001F\u007F-\u009F]/g, "").replace(/\\n/g, '\n');
         const serviceAccount = JSON.parse(sanitized);
-        if (admin.apps.length === 0) {
-            admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-        }
+        if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
         firebaseStatus = "Conectado com Sucesso! 🔥";
-        console.log('Firebase OK ✅');
-    } catch (err) {
-        firebaseStatus = `Erro no JSON: ${err.message} ❌`;
-        console.error(firebaseStatus);
-    }
+    } catch (err) { firebaseStatus = `Erro no JSON: ${err.message} ❌`; }
 }
 
 const db = (admin.apps.length > 0) ? admin.firestore() : null;
@@ -48,9 +42,12 @@ async function loadDataFromBackup() {
     try {
         const userSnap = await db.collection('users').get();
         users = userSnap.docs.map(d => d.data());
+        const groupSnap = await db.collection('groups').get();
+        groups = groupSnap.docs.map(d => d.data());
         const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(1000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
-    } catch (e) { console.error('Aviso: Backup incompleto.'); }
+        backupInfo = `${users.length} usuários recuperados. ✅`;
+    } catch (e) { backupInfo = "Erro no backup. ⚠️"; }
 }
 loadDataFromBackup();
 
@@ -97,6 +94,9 @@ app.post('/login', (req, res) => {
 
 app.post('/send_message', async (req, res) => {
     const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
+    const target = users.find(u => u.username === recipient);
+    if (target && target.blockedUsers && target.blockedUsers.includes(username)) return res.json({ status: 'ok' });
+
     let finalContent = content;
     if (isAudio || isImage || isVideo) {
         const b2Url = await uploadToB2(content, `media_${Date.now()}`);
@@ -108,12 +108,59 @@ app.post('/send_message', async (req, res) => {
     if (db) db.collection('messages').doc(msgData.id.toString()).set(msgData).catch(() => {});
 });
 
+// OTIMIZADO: Retorna objetos de usuário completos para a lista inicial
+app.get('/conversations/list/:username', (req, res) => {
+    const me = req.params.username;
+    const involvedUsernames = new Set();
+    messages.forEach(m => {
+        if (!m.isGroup) {
+            if (m.from === me) involvedUsernames.add(m.to);
+            if (m.to === me) involvedUsernames.add(m.from);
+        }
+    });
+
+    const involvedUsers = users
+        .filter(u => involvedUsernames.has(u.username))
+        .map(u => ({
+            username: u.username,
+            profilePic: u.profilePic,
+            lastSeen: u.lastSeen,
+            bio: u.bio
+        }));
+
+    res.json(involvedUsers);
+});
+
 app.get('/conversation/:u1/:u2', (req, res) => {
     const list = messages.filter(m => !m.isGroup && ((m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1)));
     res.json(list);
 });
 
-app.get('/messages/unread/:username', (req, res) => res.json(messages.filter(m => m.to === req.params.username && !m.read)));
+app.post('/user/block', (req, res) => {
+    const { username, target } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        if (!user.blockedUsers) user.blockedUsers = [];
+        if (!user.blockedUsers.includes(target)) user.blockedUsers.push(target);
+        res.json({ status: 'ok', list: user.blockedUsers });
+        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
+    }
+});
+
+app.post('/user/unblock', (req, res) => {
+    const { username, target } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        user.blockedUsers = (user.blockedUsers || []).filter(u => u !== target);
+        res.json({ status: 'ok', list: user.blockedUsers });
+        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
+    }
+});
+
+app.get('/user/blocked_list/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    res.json(user ? (user.blockedUsers || []) : []);
+});
 
 app.post('/user/update_pic', async (req, res) => {
     const { username, profilePic } = req.body;
@@ -140,21 +187,30 @@ app.get('/b2file/:filename', async (req, res) => {
     } catch (e) { res.status(404).send('Off'); }
 });
 
-app.post('/call/signal', (req, res) => {
-    const { to, from, data } = req.body;
-    if (!callSignals[to]) callSignals[to] = [];
-    callSignals[to].push({ from, data, time: Date.now() });
-    res.json({ status: 'ok' });
+app.get('/user/info/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    if (user) res.json(user);
+    else res.status(404).send('Not found');
 });
 
-app.get('/call/check/:username', (req, res) => {
-    const signals = callSignals[req.params.username] || [];
-    callSignals[req.params.username] = [];
-    res.json(signals);
+app.get('/status/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    if (!user) return res.json({ status: 'OFFLINE' });
+    const online = (Date.now() - user.lastSeen) / 1000 < 60;
+    res.json({ status: online ? 'ONLINE' : 'OFFLINE' });
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Turbo Server v20.9</h1><p>Firebase Status: ${firebaseStatus}</p>`);
+    res.send(`
+        <body style="background: #0B0E14; color: white; font-family: sans-serif; padding: 40px;">
+            <h1>🛰️ NOCTIS Hybrid Server v20.10</h1>
+            <div style="background: #1E293B; padding: 20px; border-radius: 10px; border: 1px solid #00D2FF;">
+                <p><b>Google Firebase:</b> ${firebaseStatus}</p>
+                <p><b>Monitor de Backup:</b> ${backupInfo}</p>
+                <p><b>Performance:</b> RAM Priority Ativo ✅</p>
+            </div>
+        </body>
+    `);
 });
 
-app.listen(port, () => console.log(`Noctis Turbo v20.9 no ar.`));
+app.listen(port, () => console.log(`Noctis v20.10 no ar.`));
