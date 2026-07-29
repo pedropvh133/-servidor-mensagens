@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.18 (FIX GRUPO)
- * ESTABILIZAÇÃO: Restauração definitiva de todas as funções de Grupo com Auditoria.
+ * NOCTIS MESSENGER - SERVER V20.19 (GROUP ENHANCEMENT)
+ * EVOLUÇÃO: Adição de Descrição e Regras aos Grupos.
  */
 
 const express = require('express');
@@ -32,10 +32,8 @@ if (rawConfig) {
             admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
         }
         firebaseStatus = "Conectado! 🔥";
-        console.log('Firebase OK ✅');
     } catch (err) {
         firebaseStatus = `Erro no JSON: ${err.message} ❌`;
-        console.error('Firebase Erro:', err.message);
     }
 }
 
@@ -53,7 +51,6 @@ async function initB2() {
     try {
         await b2.authorize();
         b2Status = "Autorizado! ☁️";
-        console.log('B2 OK ✅');
     } catch (e) {
         b2Status = `Erro: ${e.message} ❌`;
     }
@@ -68,7 +65,12 @@ async function loadDataFromBackup() {
         users = userSnap.docs.map(d => d.data());
 
         const groupSnap = await db.collection('groups').get();
-        groups = groupSnap.docs.map(d => d.data());
+        groups = groupSnap.docs.map(d => {
+            const g = d.data();
+            if (!g.description) g.description = "";
+            if (!g.rules) g.rules = "";
+            return g;
+        });
 
         const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(1000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
@@ -90,10 +92,7 @@ async function uploadToB2(base64Data, fileName) {
             data: Buffer.from(base64Data, 'base64')
         });
         return `B2_URL:${uploadResp.data.fileName}`;
-    } catch (e) {
-        console.error('Falha Upload B2:', e.message);
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
 app.use(cors());
@@ -121,35 +120,36 @@ app.post('/login', (req, res) => {
     } else res.status(401).json({ error: 'SENHA_INCORRETA' });
 });
 
-app.post('/user/update_pic', async (req, res) => {
-    const { username, profilePic } = req.body;
-    const b2Url = await uploadToB2(profilePic, `profile_${username}_${Date.now()}`);
-    if (b2Url) {
-        const user = users.find(u => u.username === username);
-        if (user) {
-            user.profilePic = b2Url;
-            res.status(200).json({ status: 'ok' });
-            if (db) db.collection('users').doc(username).update({ profilePic: b2Url });
-        }
-    } else res.status(500).send('B2 Error');
-});
-
-app.post('/user/delete_account', async (req, res) => {
-    const { username, password } = req.body;
-    const index = users.findIndex(u => u.username === username && u.password === password);
-    if (index !== -1) {
-        users.splice(index, 1);
+app.post('/user/update_settings', async (req, res) => {
+    const { username, currentPassword, oldPassword, newUsername, newPassword, privacyLastSeen, privacyProfilePic, privacyCalls, bio } = req.body;
+    const pass = currentPassword || oldPassword;
+    const user = users.find(u => u.username === username);
+    if (user && user.password === pass) {
+        if (newPassword) user.password = newPassword;
+        if (privacyLastSeen) user.privacyLastSeen = privacyLastSeen;
+        if (privacyProfilePic) user.privacyProfilePic = privacyProfilePic;
+        if (privacyCalls) user.privacyCalls = privacyCalls;
+        if (bio !== undefined) user.bio = bio;
         res.status(200).json({ status: 'ok' });
-        if (db) db.collection('users').doc(username).delete().catch(() => {});
+        if (db) db.collection('users').doc(username).update(user).catch(() => {});
     } else res.status(401).send('Erro');
 });
 
 // --- ROTAS DE GRUPOS ---
 
 app.post('/create_group', async (req, res) => {
-    const { name, creator } = req.body;
+    const { name, creator, description, rules } = req.body;
     const groupId = 'group_' + Date.now();
-    const newGroup = { id: groupId, name, creator, members: [creator], admins: [creator], profilePic: null };
+    const newGroup = {
+        id: groupId,
+        name,
+        creator,
+        members: [creator],
+        admins: [creator],
+        profilePic: null,
+        description: description || "",
+        rules: rules || ""
+    };
     groups.push(newGroup);
     res.status(201).json(newGroup);
     if (db) db.collection('groups').doc(groupId).set(newGroup).catch(() => {});
@@ -175,6 +175,22 @@ app.post('/group/add_member', (req, res) => {
     } else res.status(403).send('Erro');
 });
 
+app.post('/group/update_settings', (req, res) => {
+    const { groupId, adminUser, name, description, rules } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        if (name) group.name = name;
+        if (description !== undefined) group.description = description;
+        if (rules !== undefined) group.rules = rules;
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({
+            name: group.name,
+            description: group.description,
+            rules: group.rules
+        }).catch(() => {});
+    } else res.status(403).send('Não autorizado');
+});
+
 app.post('/group/update_pic', async (req, res) => {
     const { groupId, adminUser, profilePic } = req.body;
     const group = groups.find(g => g.id === groupId);
@@ -188,16 +204,6 @@ app.post('/group/update_pic', async (req, res) => {
     } else res.status(403).send('Erro');
 });
 
-app.post('/group/update_name', (req, res) => {
-    const { groupId, adminUser, newName } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        group.name = newName;
-        res.status(200).json(group);
-        if (db) db.collection('groups').doc(groupId).update({ name: newName });
-    } else res.status(403).send('Erro');
-});
-
 app.post('/group/delete', (req, res) => {
     const { groupId, adminUser } = req.body;
     const index = groups.findIndex(g => g.id === groupId);
@@ -205,7 +211,7 @@ app.post('/group/delete', (req, res) => {
         groups.splice(index, 1);
         res.status(200).json({ status: 'ok' });
         if (db) db.collection('groups').doc(groupId).delete().catch(() => {});
-    } else res.status(403).send('Erro');
+    } else res.status(403).send('Não autorizado');
 });
 
 // --- MENSAGENS E CHAT ---
@@ -227,24 +233,6 @@ app.post('/send_message', async (req, res) => {
     if (db) db.collection('messages').doc(msgData.id.toString()).set(msgData).catch(() => {});
 });
 
-app.get('/messages/unread/:username', (req, res) => {
-    const me = req.params.username;
-    const myGroupsList = groups.filter(g => g.members.includes(me));
-    const myGroupsIds = myGroupsList.map(g => g.id);
-    const unread = messages.filter(m => {
-        const isToMe = !m.isGroup && m.to === me;
-        const isToMyGroup = m.isGroup && myGroupsIds.includes(m.to) && m.from !== me;
-        return (isToMe || isToMyGroup) && !m.read;
-    }).map(m => {
-        if (m.isGroup) {
-            const grp = myGroupsList.find(g => g.id === m.to);
-            return { ...m, groupName: grp ? grp.name : "Grupo" };
-        }
-        return m;
-    });
-    res.json(unread);
-});
-
 app.get('/conversations/list/:username', (req, res) => {
     const me = req.params.username;
     const involved = new Set();
@@ -263,7 +251,48 @@ app.get('/conversation/:u1/:u2', (req, res) => {
     res.json(list);
 });
 
-// --- SEGURANÇA E OUTROS ---
+app.get('/messages/unread/:username', (req, res) => {
+    const me = req.params.username;
+    const myGroupsList = groups.filter(g => g.members.includes(me));
+    const myGroupsIds = myGroupsList.map(g => g.id);
+    const unread = messages.filter(m => {
+        const isToMe = !m.isGroup && m.to === me;
+        const isToMyGroup = m.isGroup && myGroupsIds.includes(m.to) && m.from !== me;
+        return (isToMe || isToMyGroup) && !m.read;
+    }).map(m => {
+        if (m.isGroup) {
+            const grp = myGroupsList.find(g => g.id === m.to);
+            return { ...m, groupName: grp ? grp.name : "Grupo" };
+        }
+        return m;
+    });
+    res.json(unread);
+});
+
+// --- SEGURANÇA E BLOQUEIO ---
+
+app.post('/user/block', (req, res) => {
+    const { username, target } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        if (!user.blockedUsers) user.blockedUsers = [];
+        if (!user.blockedUsers.includes(target)) user.blockedUsers.push(target);
+        res.json({ status: 'ok', list: user.blockedUsers });
+        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
+    }
+});
+
+app.post('/user/unblock', (req, res) => {
+    const { username, target } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        user.blockedUsers = (user.blockedUsers || []).filter(u => u !== target);
+        res.json({ status: 'ok', list: user.blockedUsers });
+        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
+    }
+});
+
+// --- OUTRAS ROTAS ---
 
 app.get('/b2file/:filename', async (req, res) => {
     try {
@@ -299,13 +328,18 @@ app.get('/status/:username', (req, res) => {
     res.json({ status: online ? 'ONLINE' : 'OFFLINE' });
 });
 
+app.get('/user/info/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    if (user) res.json(user);
+    else res.status(404).send('Not found');
+});
+
 app.get('/', (req, res) => {
     res.send(`
         <body style="background: #0B0E14; color: white; font-family: sans-serif; padding: 40px;">
-            <h1>🛰️ NOCTIS Turbo v20.18</h1>
+            <h1>🛰️ NOCTIS Hybrid Server v20.19</h1>
             <div style="background: #1E293B; padding: 20px; border-radius: 10px; border: 1px solid #00D2FF;">
                 <p><b>Google Firebase:</b> ${firebaseStatus}</p>
-                <p><b>Backblaze B2:</b> ${b2Status}</p>
                 <p><b>Persistência:</b> ${backupInfo}</p>
                 <p><b>RAM:</b> ${users.length} usuários | ${groups.length} grupos</p>
             </div>
@@ -313,4 +347,4 @@ app.get('/', (req, res) => {
     `);
 });
 
-app.listen(port, () => console.log(`Noctis v20.18 pronto.`));
+app.listen(port, () => console.log(`Noctis v20.19 pronto.`));
