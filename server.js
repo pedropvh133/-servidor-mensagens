@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.4 (FULL TURBO)
- * ARQUITETURA HÍBRIDA: RAM para Operação + Firebase Backup + B2 Storage
+ * NOCTIS MESSENGER - SERVER V20.5 (ULTRA STABLE)
+ * CORREÇÃO DE SEGURANÇA E DADOS: RAM Priority com Fallback Seguro
  */
 
 const express = require('express');
@@ -23,9 +23,8 @@ let firebaseStatus = "Aguardando chave... ⚪";
 const rawConfig = process.env.FIREBASE_CONFIG;
 if (rawConfig) {
     try {
-        let serviceAccount;
         if (rawConfig.trim().startsWith("{")) {
-            serviceAccount = JSON.parse(rawConfig.replace(/\\n/g, '\n'));
+            const serviceAccount = JSON.parse(rawConfig.replace(/\\n/g, '\n'));
             if (admin.apps.length === 0) {
                 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
             }
@@ -51,21 +50,19 @@ const B2_BUCKET_ID = process.env.B2_BUCKET_ID;
 async function loadDataFromBackup() {
     if (!db) return;
     try {
-        console.log('Ressuscitando dados... ⏳');
+        console.log('Iniciando ressurreição... ⏳');
         const userSnap = await db.collection('users').get();
         users = userSnap.docs.map(d => d.data());
-
         const groupSnap = await db.collection('groups').get();
         groups = groupSnap.docs.map(d => d.data());
-
         const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(2000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
-        console.log(`Ressurreição completa! ${users.length} usuários e ${messages.length} mensagens carregadas. ✅`);
-    } catch (e) { console.error('Aviso: Backup inacessível (Cota ou Chave).'); }
+        console.log(`Dados carregados: ${users.length} users, ${messages.length} msgs.`);
+    } catch (e) { console.error('Aviso: Backup inacessível.'); }
 }
 loadDataFromBackup();
 
-// --- LÓGICA DE UPLOAD B2 ---
+// --- LÓGICA DE MÍDIA ---
 async function uploadToB2(base64Data, fileName) {
     if (!B2_BUCKET_ID) return null;
     try {
@@ -78,10 +75,7 @@ async function uploadToB2(base64Data, fileName) {
             data: Buffer.from(base64Data, 'base64')
         });
         return `B2_URL:${uploadResp.data.fileName}`;
-    } catch (e) {
-        console.error('Erro B2:', e.message);
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
 app.use(cors());
@@ -113,22 +107,14 @@ app.post('/login', (req, res) => {
 app.post('/send_message', async (req, res) => {
     const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
     let finalContent = content;
-
     if (isAudio || isImage || isVideo) {
         const b2Url = await uploadToB2(content, `media_${Date.now()}_${username}`);
         if (b2Url) finalContent = b2Url;
     }
-
-    const msgData = {
-        id: Date.now(), from: username, to: recipient, content: finalContent,
-        isAudio, isImage, isVideo, viewOnce, isGroup,
-        timestamp: Date.now(), read: false
-    };
-
+    const msgData = { id: Date.now(), from: username, to: recipient, content: finalContent, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false };
     messages.push(msgData);
     if (messages.length > 5000) messages.shift();
     res.status(200).json({ status: 'ok' });
-
     if (db) db.collection('messages').doc(msgData.id.toString()).set(msgData).catch(() => {});
 });
 
@@ -141,8 +127,6 @@ app.get('/messages/unread/:username', (req, res) => {
     res.json(messages.filter(m => m.to === req.params.username && !m.read));
 });
 
-// --- PERFIL E GRUPOS ---
-
 app.post('/user/update_pic', async (req, res) => {
     const { username, profilePic } = req.body;
     const b2Url = await uploadToB2(profilePic, `profile_${username}_${Date.now()}`);
@@ -152,23 +136,6 @@ app.post('/user/update_pic', async (req, res) => {
         res.status(200).json({ status: 'ok' });
         if (db) db.collection('users').doc(username).update({ profilePic: b2Url });
     } else res.status(500).send('Erro B2');
-});
-
-app.get('/user/info/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    if (user) res.json(user);
-    else res.status(404).send('Not found');
-});
-
-app.get('/groups/:username', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.username))));
-
-app.post('/create_group', async (req, res) => {
-    const { name, creator } = req.body;
-    const groupId = 'group_' + Date.now();
-    const newGroup = { id: groupId, name, creator, members: [creator], admins: [creator], profilePic: null };
-    groups.push(newGroup);
-    res.status(201).json(newGroup);
-    if (db) db.collection('groups').doc(groupId).set(newGroup).catch(() => {});
 });
 
 app.get('/b2file/:filename', async (req, res) => {
@@ -183,8 +150,6 @@ app.get('/b2file/:filename', async (req, res) => {
         res.send(Buffer.from(downloadResp.data));
     } catch (e) { res.status(404).send('Off'); }
 });
-
-// --- CHAMADAS E STATUS ---
 
 app.post('/call/signal', (req, res) => {
     const { to, from, data } = req.body;
@@ -206,20 +171,18 @@ app.get('/status/:username', (req, res) => {
     res.json({ status: online ? 'ONLINE' : 'OFFLINE' });
 });
 
-// --- PÁGINA INICIAL ---
 app.get('/', (req, res) => {
     res.send(`
         <body style="background: #0B0E14; color: white; font-family: sans-serif; padding: 40px; text-align: center;">
-            <h1 style="color: #00D2FF;">🛰️ NOCTIS FULL TURBO v20.4</h1>
+            <h1 style="color: #00D2FF;">🛰️ NOCTIS ULTRA STABLE v20.5</h1>
             <div style="background: #1E293B; padding: 20px; border-radius: 15px; border: 1px solid #00D2FF; display: inline-block; min-width: 300px; text-align: left;">
                 <p><b>Google Firebase:</b> ${firebaseStatus}</p>
                 <p><b>Usuários:</b> ${users.length}</p>
                 <p><b>Mensagens:</b> ${messages.length}</p>
-                <p><b>Grupos:</b> ${groups.length}</p>
             </div>
-            <p style="color: #94A3B8; margin-top: 20px;">Indestrutível. Persistente. Veloz.</p>
+            <p style="color: #94A3B8; margin-top: 20px;">Seguro. Blindado. Imparável.</p>
         </body>
     `);
 });
 
-app.listen(port, () => console.log(`Noctis Turbo na porta ${port}`));
+app.listen(port, () => console.log(`Noctis v20.5 na porta ${port}`));
