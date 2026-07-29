@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.12 (FULL GROUP SUITE)
- * ESTABILIZAÇÃO: Restauração completa de todas as funções de Grupo e Mídia.
+ * NOCTIS MESSENGER - SERVER V20.13 (FULL RESTORATION)
+ * ESTABILIZAÇÃO: Restauração de todas as funções (Grupos, Bloqueio, Delete e Unread)
  */
 
 const express = require('express');
@@ -95,17 +95,32 @@ app.post('/login', (req, res) => {
     } else res.status(401).json({ error: 'SENHA_INCORRETA' });
 });
 
-app.post('/user/update_pic', async (req, res) => {
-    const { username, profilePic } = req.body;
-    const b2Url = await uploadToB2(profilePic, `profile_${username}_${Date.now()}`);
-    if (b2Url) {
-        const user = users.find(u => u.username === username);
-        if (user) {
-            user.profilePic = b2Url;
-            res.status(200).json({ status: 'ok' });
-            if (db) db.collection('users').doc(username).update({ profilePic: b2Url });
+app.post('/user/update_settings', async (req, res) => {
+    const { username, currentPassword, oldPassword, newUsername, newPassword, privacyLastSeen, privacyProfilePic, privacyCalls, bio } = req.body;
+    const pass = currentPassword || oldPassword;
+    const user = users.find(u => u.username === username);
+    if (user && user.password === pass) {
+        if (newPassword) user.password = newPassword;
+        if (privacyLastSeen) user.privacyLastSeen = privacyLastSeen;
+        if (privacyProfilePic) user.privacyProfilePic = privacyProfilePic;
+        if (privacyCalls) user.privacyCalls = privacyCalls;
+        if (bio !== undefined) user.bio = bio;
+        res.status(200).json({ status: 'ok' });
+        if (db) db.collection('users').doc(username).update(user).catch(() => {});
+    } else res.status(401).send('Erro');
+});
+
+app.post('/user/delete_account', async (req, res) => {
+    const { username, password } = req.body;
+    const index = users.findIndex(u => u.username === username && u.password === password);
+    if (index !== -1) {
+        users.splice(index, 1);
+        res.status(200).json({ status: 'ok' });
+        if (db) {
+            db.collection('users').doc(username).delete().catch(() => {});
+            // Opcional: Apagar mensagens do usuário
         }
-    } else res.status(500).send('Erro B2');
+    } else res.status(401).send('Não autorizado');
 });
 
 // --- ROTAS DE GRUPOS ---
@@ -192,20 +207,66 @@ app.get('/conversation/:u1/:u2', (req, res) => {
     res.json(list);
 });
 
+app.get('/messages/unread/:username', (req, res) => {
+    res.json(messages.filter(m => m.to === req.params.username && !m.read));
+});
+
+// --- SEGURANÇA E BLOQUEIO ---
+
+app.post('/user/block', (req, res) => {
+    const { username, target } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        if (!user.blockedUsers) user.blockedUsers = [];
+        if (!user.blockedUsers.includes(target)) user.blockedUsers.push(target);
+        res.json({ status: 'ok', list: user.blockedUsers });
+        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
+    }
+});
+
+app.post('/user/unblock', (req, res) => {
+    const { username, target } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        user.blockedUsers = (user.blockedUsers || []).filter(u => u !== target);
+        res.json({ status: 'ok', list: user.blockedUsers });
+        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
+    }
+});
+
+app.get('/user/blocked_list/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    res.json(user ? (user.blockedUsers || []) : []);
+});
+
 // --- OUTRAS ROTAS ---
 
 app.get('/b2file/:filename', async (req, res) => {
     try {
         await b2.authorize();
         const bucketSnap = await b2.getBucket({ bucketId: B2_BUCKET_ID });
+        const bucketName = bucketSnap.data.buckets[0].bucketName;
         const downloadResp = await b2.downloadFileByName({
-            bucketName: bucketSnap.data.buckets[0].bucketName,
+            bucketName: bucketName,
             fileName: req.params.filename,
             responseType: 'arraybuffer'
         });
         res.setHeader('Content-Type', 'application/octet-stream');
         res.send(Buffer.from(downloadResp.data));
     } catch (e) { res.status(404).send('Off'); }
+});
+
+app.post('/user/update_pic', async (req, res) => {
+    const { username, profilePic } = req.body;
+    const b2Url = await uploadToB2(profilePic, `profile_${username}_${Date.now()}`);
+    if (b2Url) {
+        const user = users.find(u => u.username === username);
+        if (user) {
+            user.profilePic = b2Url;
+            res.status(200).json({ status: 'ok' });
+            if (db) db.collection('users').doc(username).update({ profilePic: b2Url });
+        }
+    } else res.status(500).send('Erro B2');
 });
 
 app.post('/call/signal', (req, res) => {
@@ -228,10 +289,16 @@ app.get('/status/:username', (req, res) => {
     res.json({ status: online ? 'ONLINE' : 'OFFLINE' });
 });
 
+app.get('/user/info/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    if (user) res.json(user);
+    else res.status(404).send('Not found');
+});
+
 app.get('/', (req, res) => {
     res.send(`
         <body style="background: #0B0E14; color: white; font-family: sans-serif; padding: 40px;">
-            <h1>🛰️ NOCTIS Hybrid Server v20.12</h1>
+            <h1>🛰️ NOCTIS Hybrid Server v20.13</h1>
             <div style="background: #1E293B; padding: 20px; border-radius: 10px; border: 1px solid #00D2FF;">
                 <p><b>Google Firebase:</b> ${firebaseStatus}</p>
                 <p><b>Persistência:</b> ${backupInfo}</p>
@@ -241,4 +308,4 @@ app.get('/', (req, res) => {
     `);
 });
 
-app.listen(port, () => console.log(`Noctis v20.12 pronto.`));
+app.listen(port, () => console.log(`Noctis v20.13 pronto.`));
