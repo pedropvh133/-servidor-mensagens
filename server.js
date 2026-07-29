@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.14 (GROUP NOTIFICATIONS)
- * ESTABILIZAÇÃO: Notificações de adição e mensagens de grupo corrigidas.
+ * NOCTIS MESSENGER - SERVER V20.15 (COMPLETE GROUP ENGINE)
+ * ESTABILIZAÇÃO: Restauração definitiva de todas as funções de Grupo.
  */
 
 const express = require('express');
@@ -40,11 +40,14 @@ const B2_BUCKET_ID = process.env.B2_BUCKET_ID;
 async function loadDataFromBackup() {
     if (!db) return;
     try {
+        console.log('Ressuscitando dados... ⏳');
         const userSnap = await db.collection('users').get();
         users = userSnap.docs.map(d => d.data());
+
         const groupSnap = await db.collection('groups').get();
         groups = groupSnap.docs.map(d => d.data());
-        const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(1000).get();
+
+        const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(2000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
         backupInfo = `${users.length} usuários e ${groups.length} grupos recuperados. ✅`;
     } catch (e) { backupInfo = "Erro no backup. ⚠️"; }
@@ -70,7 +73,7 @@ async function uploadToB2(base64Data, fileName) {
 app.use(cors());
 app.use(bodyParser.json({ limit: '100mb' }));
 
-// --- ROTAS ---
+// --- ROTAS DE USUÁRIO ---
 
 app.post('/register', async (req, res) => {
     const { username, password } = req.body;
@@ -92,6 +95,31 @@ app.post('/login', (req, res) => {
     } else res.status(401).json({ error: 'SENHA_INCORRETA' });
 });
 
+app.post('/user/update_settings', async (req, res) => {
+    const { username, currentPassword, oldPassword, newUsername, newPassword, privacyLastSeen, privacyProfilePic, privacyCalls, bio } = req.body;
+    const pass = currentPassword || oldPassword;
+    const user = users.find(u => u.username === username);
+    if (user && user.password === pass) {
+        if (newPassword) user.password = newPassword;
+        if (privacyLastSeen) user.privacyLastSeen = privacyLastSeen;
+        if (privacyProfilePic) user.privacyProfilePic = privacyProfilePic;
+        if (privacyCalls) user.privacyCalls = privacyCalls;
+        if (bio !== undefined) user.bio = bio;
+        res.status(200).json({ status: 'ok' });
+        if (db) db.collection('users').doc(username).update(user).catch(() => {});
+    } else res.status(401).send('Erro');
+});
+
+app.post('/user/delete_account', async (req, res) => {
+    const { username, password } = req.body;
+    const index = users.findIndex(u => u.username === username && u.password === password);
+    if (index !== -1) {
+        users.splice(index, 1);
+        res.status(200).json({ status: 'ok' });
+        if (db) db.collection('users').doc(username).delete().catch(() => {});
+    } else res.status(401).send('Não autorizado');
+});
+
 // --- ROTAS DE GRUPOS ---
 
 app.post('/create_group', async (req, res) => {
@@ -107,6 +135,10 @@ app.get('/groups/:username', (req, res) => {
     res.json(groups.filter(g => g.members.includes(req.params.username)));
 });
 
+app.get('/group/messages/:groupId', (req, res) => {
+    res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId));
+});
+
 app.post('/group/add_member', (req, res) => {
     const { groupId, adminUser, newMember } = req.body;
     const group = groups.find(g => g.id === groupId);
@@ -115,11 +147,34 @@ app.post('/group/add_member', (req, res) => {
 
         // SINAL DE CONTROLE: Notifica o usuário de que foi adicionado
         if (!callSignals[newMember]) callSignals[newMember] = [];
-        const controlSignal = { from: adminUser, type: 'CONTROL', data: Buffer.from(`ADDED_TO_GROUP:${group.name}`).toString('base64'), time: Date.now() };
+        const controlSignal = { from: adminUser, data: Buffer.from(`ADDED_TO_GROUP:${group.name}`).toString('base64'), time: Date.now() };
         callSignals[newMember].push(controlSignal);
 
         res.status(200).json(group);
         if (db) db.collection('groups').doc(groupId).update({ members: group.members });
+    } else res.status(403).send('Não autorizado');
+});
+
+app.post('/group/update_pic', async (req, res) => {
+    const { groupId, adminUser, profilePic } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        const b2Url = await uploadToB2(profilePic, `group_${groupId}_${Date.now()}`);
+        if (b2Url) {
+            group.profilePic = b2Url;
+            res.status(200).json(group);
+            if (db) db.collection('groups').doc(groupId).update({ profilePic: b2Url });
+        } else res.status(500).send('Erro B2');
+    } else res.status(403).send('Não autorizado');
+});
+
+app.post('/group/update_name', (req, res) => {
+    const { groupId, adminUser, newName } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        group.name = newName;
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({ name: newName });
     } else res.status(403).send('Não autorizado');
 });
 
@@ -188,7 +243,50 @@ app.get('/conversation/:u1/:u2', (req, res) => {
     res.json(list);
 });
 
+// --- SEGURANÇA E BLOQUEIO ---
+
+app.post('/user/block', (req, res) => {
+    const { username, target } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        if (!user.blockedUsers) user.blockedUsers = [];
+        if (!user.blockedUsers.includes(target)) user.blockedUsers.push(target);
+        res.json({ status: 'ok', list: user.blockedUsers });
+        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
+    }
+});
+
+app.post('/user/unblock', (req, res) => {
+    const { username, target } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        user.blockedUsers = (user.blockedUsers || []).filter(u => u !== target);
+        res.json({ status: 'ok', list: user.blockedUsers });
+        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
+    }
+});
+
+app.get('/user/blocked_list/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    res.json(user ? (user.blockedUsers || []) : []);
+});
+
 // --- OUTRAS ROTAS ---
+
+app.get('/b2file/:filename', async (req, res) => {
+    try {
+        await b2.authorize();
+        const bucketSnap = await b2.getBucket({ bucketId: B2_BUCKET_ID });
+        const bucketName = bucketSnap.data.buckets[0].bucketName;
+        const downloadResp = await b2.downloadFileByName({
+            bucketName: bucketName,
+            fileName: req.params.filename,
+            responseType: 'arraybuffer'
+        });
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.send(Buffer.from(downloadResp.data));
+    } catch (e) { res.status(404).send('Off'); }
+});
 
 app.post('/call/signal', (req, res) => {
     const { to, from, data } = req.body;
@@ -210,8 +308,23 @@ app.get('/status/:username', (req, res) => {
     res.json({ status: online ? 'ONLINE' : 'OFFLINE' });
 });
 
-app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Turbo v20.14</h1><p>Backup: ${backupInfo}</p>`);
+app.get('/user/info/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    if (user) res.json(user);
+    else res.status(404).send('Not found');
 });
 
-app.listen(port, () => console.log(`Noctis pronto.`));
+app.get('/', (req, res) => {
+    res.send(`
+        <body style="background: #0B0E14; color: white; font-family: sans-serif; padding: 40px;">
+            <h1>🛰️ NOCTIS Hybrid Server v20.15</h1>
+            <div style="background: #1E293B; padding: 20px; border-radius: 10px; border: 1px solid #00D2FF;">
+                <p><b>Google Firebase:</b> ${firebaseStatus}</p>
+                <p><b>Persistência:</b> ${backupInfo}</p>
+                <p><b>RAM:</b> ${users.length} usuários | ${groups.length} grupos</p>
+            </div>
+        </body>
+    `);
+});
+
+app.listen(port, () => console.log(`Noctis v20.15 pronto.`));
