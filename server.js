@@ -124,7 +124,7 @@ app.use(bodyParser.json({ limit: '100mb' }));
 app.post('/admin/update_version', async (req, res) => {
     const { versionCode, apkName, password } = req.body;
     // Senha simples para evitar abusos (pode mudar para uma env se quiser)
-    if (password !== "noctis_admin") return res.status(403).send('Negado');
+    if (password !== "pedropvh133@gmail.com/admin") return res.status(403).send('Negado');
 
     latestVersionCode = parseInt(versionCode);
     latestApkName = apkName;
