@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.24 (ULTRA GROUP SYNC)
- * ESTABILIZAÇÃO: Fim do 404 em Fotos de Grupo e Chamadas Multicast.
+ * NOCTIS MESSENGER - SERVER V20.25 (B2 ROBUSTNESS)
+ * ESTABILIZAÇÃO: Correção de Erro 401 e Melhoria de Sincronia de Mídia.
  */
 
 const express = require('express');
@@ -12,12 +12,13 @@ const B2 = require('backblaze-b2');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// --- ESTADO GLOBAL (RAM) ---
+// --- ESTADO GLOBAL ---
 let users = [];
 let messages = [];
 let groups = [];
 let callSignals = {};
 let firebaseStatus = "Aguardando... ⚪";
+let b2Status = "Aguardando... ⚪";
 let backupInfo = "Iniciando...";
 
 // --- FIREBASE CONFIG ---
@@ -27,21 +28,34 @@ if (rawConfig) {
         let clean = rawConfig.trim();
         let sanitized = clean.replace(/[\u0000-\u001F\u007F-\u009F]/g, "").replace(/\\n/g, '\n');
         const serviceAccount = JSON.parse(sanitized);
-        if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+        if (admin.apps.length === 0) {
+            admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+        }
         firebaseStatus = "Conectado! 🔥";
-    } catch (err) { firebaseStatus = `Erro JSON: ${err.message} ❌`; }
+    } catch (err) { firebaseStatus = `Erro no JSON: ${err.message} ❌`; }
 }
 const db = (admin.apps.length > 0) ? admin.firestore() : null;
 
-// --- BACKBLAZE B2 ---
-const b2 = new B2({ applicationKeyId: process.env.B2_KEY_ID || '', applicationKey: process.env.B2_APP_KEY || '' });
+// --- BACKBLAZE B2 CONFIG ---
+const b2 = new B2({
+    applicationKeyId: process.env.B2_KEY_ID || '',
+    applicationKey: process.env.B2_APP_KEY || ''
+});
 const B2_BUCKET_ID = process.env.B2_BUCKET_ID;
 
-async function initB2() {
-    if (!process.env.B2_KEY_ID || !B2_BUCKET_ID) return;
-    try { await b2.authorize(); console.log('B2 OK'); } catch (e) { console.error('B2 Erro'); }
+// Função para garantir que o B2 está autorizado antes de cada operação importante
+async function ensureB2() {
+    try {
+        await b2.authorize();
+        b2Status = "Autorizado! ☁️";
+        return true;
+    } catch (e) {
+        console.error('Falha na autorização B2:', e.message);
+        b2Status = "Erro de Chaves! ❌";
+        return false;
+    }
 }
-initB2();
+ensureB2();
 
 // --- RESSURREIÇÃO ---
 async function loadDataFromBackup() {
@@ -57,7 +71,7 @@ async function loadDataFromBackup() {
         groups = groupSnap.docs.map(d => d.data());
         const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(1000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
-        backupInfo = `${users.length} usuários e ${groups.length} grupos ativos. ✅`;
+        backupInfo = `${users.length} usuários e ${groups.length} grupos recuperados. ✅`;
     } catch (e) { backupInfo = "Erro no backup. ⚠️"; }
 }
 loadDataFromBackup();
@@ -66,7 +80,7 @@ loadDataFromBackup();
 async function uploadToB2(base64Data, fileName) {
     if (!B2_BUCKET_ID) return null;
     try {
-        await b2.authorize();
+        await ensureB2();
         const uploadUrlResp = await b2.getUploadUrl({ bucketId: B2_BUCKET_ID });
         const uploadResp = await b2.uploadFile({
             uploadUrl: uploadUrlResp.data.uploadUrl,
@@ -75,100 +89,16 @@ async function uploadToB2(base64Data, fileName) {
             data: Buffer.from(base64Data, 'base64')
         });
         return `B2_URL:${uploadResp.data.fileName}`;
-    } catch (e) { return null; }
+    } catch (e) {
+        console.error('Falha de Upload:', e.message);
+        return null;
+    }
 }
 
 app.use(cors());
 app.use(bodyParser.json({ limit: '100mb' }));
 
-// --- ROTAS DE GRUPOS (FIX 404) ---
-
-app.post('/create_group', async (req, res) => {
-    const { name, creator, description, rules } = req.body;
-    const groupId = 'group_' + Date.now();
-    const newGroup = { id: groupId, name, creator, members: [creator], admins: [creator], profilePic: null, description: description || "", rules: rules || "" };
-    groups.push(newGroup);
-    res.status(201).json(newGroup);
-    if (db) db.collection('groups').doc(groupId).set(newGroup).catch(() => {});
-});
-
-app.get('/groups/:username', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.username))));
-
-app.post('/group/add_member', (req, res) => {
-    const { groupId, adminUser, newMember } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        if (!group.members.includes(newMember)) group.members.push(newMember);
-        if (!callSignals[newMember]) callSignals[newMember] = [];
-        callSignals[newMember].push({ from: adminUser, data: Buffer.from(`ADDED_TO_GROUP:${group.name}`).toString('base64'), time: Date.now() });
-        res.status(200).json(group);
-        if (db) db.collection('groups').doc(groupId).update({ members: group.members });
-    } else res.status(403).send('Não autorizado');
-});
-
-app.post('/group/remove_member', (req, res) => {
-    const { groupId, adminUser, targetUser } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        group.members = group.members.filter(m => m !== targetUser);
-        group.admins = group.admins.filter(a => a !== targetUser);
-        res.status(200).json(group);
-        if (db) db.collection('groups').doc(groupId).update({ members: group.members, admins: group.admins }).catch(() => {});
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/promote', (req, res) => {
-    const { groupId, adminUser, targetUser } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        if (!group.admins.includes(targetUser)) group.admins.push(targetUser);
-        if (!callSignals[targetUser]) callSignals[targetUser] = [];
-        callSignals[targetUser].push({ from: adminUser, data: Buffer.from(`PROMOTED_TO_ADMIN:${groupId}`).toString('base64'), time: Date.now() });
-        res.status(200).json(group);
-        if (db) db.collection('groups').doc(groupId).update({ admins: group.admins }).catch(() => {});
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/update_pic', async (req, res) => {
-    const { groupId, adminUser, profilePic } = req.body;
-    console.log(`B2: Foto do grupo ${groupId} enviada por ${adminUser}`);
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        const b2Url = await uploadToB2(profilePic, `group_${groupId}_${Date.now()}`);
-        if (b2Url) {
-            group.profilePic = b2Url;
-            res.status(200).json(group);
-            if (db) db.collection('groups').doc(groupId).update({ profilePic: b2Url }).catch(() => {});
-        } else res.status(500).send('B2 Error');
-    } else {
-        console.error('B2: Falha na permissão ou grupo não encontrado na RAM');
-        res.status(403).send('Não autorizado ou Grupo não carregado');
-    }
-});
-
-app.post(['/group/update_name', '/group/update_settings'], (req, res) => {
-    const { groupId, adminUser, name, description, rules } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        if (name) group.name = name;
-        if (description !== undefined) group.description = description;
-        if (rules !== undefined) group.rules = rules;
-        res.status(200).json(group);
-        if (db) db.collection('groups').doc(groupId).update({ name: group.name, description: group.description, rules: group.rules }).catch(() => {});
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/delete', (req, res) => {
-    const { groupId, adminUser } = req.body;
-    const index = groups.findIndex(g => g.id === groupId);
-    if (index !== -1 && groups[index].admins.includes(adminUser)) {
-        groups.splice(index, 1);
-        res.status(200).json({ status: 'ok' });
-        if (db) db.collection('groups').doc(groupId).delete().catch(() => {});
-    } else res.status(403).send('Erro');
-});
-
-// --- OPERAÇÕES DE USUÁRIO ---
+// --- ROTAS ---
 
 app.post('/register', async (req, res) => {
     const { username, password } = req.body;
@@ -195,6 +125,10 @@ app.post('/user/update_pic', async (req, res) => {
     const b2Url = await uploadToB2(profilePic, `profile_${username}_${Date.now()}`);
     if (b2Url) {
         let user = users.find(u => u.username === username);
+        if (!user && db) {
+            const doc = await db.collection('users').doc(username).get();
+            if (doc.exists) { user = doc.data(); users.push(user); }
+        }
         if (user) {
             user.profilePic = b2Url;
             res.status(200).json({ status: 'ok' });
@@ -203,7 +137,57 @@ app.post('/user/update_pic', async (req, res) => {
     } else res.status(500).send('B2 Error');
 });
 
-// --- MENSAGENS E CONVERSAS ---
+// --- GRUPOS ---
+
+app.post('/create_group', async (req, res) => {
+    const { name, creator, description, rules } = req.body;
+    const groupId = 'group_' + Date.now();
+    const newGroup = { id: groupId, name, creator, members: [creator], admins: [creator], profilePic: null, description: description || "", rules: rules || "" };
+    groups.push(newGroup);
+    res.status(201).json(newGroup);
+    if (db) db.collection('groups').doc(groupId).set(newGroup).catch(() => {});
+});
+
+app.get('/groups/:username', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.username))));
+
+app.post('/group/add_member', (req, res) => {
+    const { groupId, adminUser, newMember } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        if (!group.members.includes(newMember)) group.members.push(newMember);
+        if (!callSignals[newMember]) callSignals[newMember] = [];
+        callSignals[newMember].push({ from: adminUser, data: Buffer.from(`ADDED_TO_GROUP:${group.name}`).toString('base64'), time: Date.now() });
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({ members: group.members });
+    } else res.status(403).send('Erro');
+});
+
+app.post(['/group/update_name', '/group/update_settings'], (req, res) => {
+    const { groupId, adminUser, name, description, rules } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        if (name) group.name = name;
+        if (description !== undefined) group.description = description;
+        if (rules !== undefined) group.rules = rules;
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({ name: group.name, description: group.description, rules: group.rules }).catch(() => {});
+    } else res.status(403).send('Erro');
+});
+
+app.post('/group/update_pic', async (req, res) => {
+    const { groupId, adminUser, profilePic } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        const b2Url = await uploadToB2(profilePic, `group_${groupId}_${Date.now()}`);
+        if (b2Url) {
+            group.profilePic = b2Url;
+            res.status(200).json(group);
+            if (db) db.collection('groups').doc(groupId).update({ profilePic: b2Url }).catch(() => {});
+        } else res.status(500).send('B2 Error');
+    } else res.status(403).send('Erro');
+});
+
+// --- MENSAGENS ---
 
 app.post('/send_message', async (req, res) => {
     const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
@@ -260,7 +244,21 @@ app.get('/messages/unread/:username', (req, res) => {
     res.json(unread);
 });
 
-// --- CHAMADAS MULTICAST ---
+// --- SEGURANÇA E SINALIZAÇÃO ---
+
+app.get('/b2file/:filename', async (req, res) => {
+    try {
+        await ensureB2();
+        const bucketSnap = await b2.getBucket({ bucketId: B2_BUCKET_ID });
+        const downloadResp = await b2.downloadFileByName({
+            bucketName: bucketSnap.data.buckets[0].bucketName,
+            fileName: req.params.filename,
+            responseType: 'arraybuffer'
+        });
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.send(Buffer.from(downloadResp.data));
+    } catch (e) { res.status(404).send('Off'); }
+});
 
 app.post('/call/signal', async (req, res) => {
     const { to, from, data } = req.body;
@@ -287,38 +285,18 @@ app.get('/call/check/:username', (req, res) => {
     res.json(signals);
 });
 
-// --- UTILIDADES ---
-
-app.get('/b2file/:filename', async (req, res) => {
-    try {
-        await b2.authorize();
-        const bucketSnap = await b2.getBucket({ bucketId: B2_BUCKET_ID });
-        const bucketName = bucketSnap.data.buckets[0].bucketName;
-        const downloadResp = await b2.downloadFileByName({
-            bucketName: bucketName,
-            fileName: req.params.filename,
-            responseType: 'arraybuffer'
-        });
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.send(Buffer.from(downloadResp.data));
-    } catch (e) { res.status(404).send('Off'); }
-});
-
-app.get('/status/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    if (!user) return res.json({ status: 'OFFLINE' });
-    const online = (Date.now() - user.lastSeen) / 1000 < 60;
-    res.json({ status: online ? 'ONLINE' : 'OFFLINE' });
-});
-
-app.get('/user/info/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    if (user) res.json(user);
-    else res.status(404).send('Not found');
-});
-
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.24</h1><p>Firebase Backup: ${backupInfo}</p>`);
+    res.send(`
+        <body style="background: #0B0E14; color: white; font-family: sans-serif; padding: 40px;">
+            <h1>🛰️ NOCTIS Hybrid v20.25</h1>
+            <div style="background: #1E293B; padding: 20px; border-radius: 10px; border: 1px solid #00D2FF;">
+                <p><b>Google Firebase:</b> ${firebaseStatus}</p>
+                <p><b>Backblaze B2:</b> ${b2Status}</p>
+                <p><b>Persistência:</b> ${backupInfo}</p>
+                <p><b>RAM:</b> ${users.length} usuários | ${groups.length} grupos</p>
+            </div>
+        </body>
+    `);
 });
 
-app.listen(port, () => console.log(`Noctis v20.24 rodando.`));
+app.listen(port, () => console.log(`Noctis v20.25 no ar.`));
