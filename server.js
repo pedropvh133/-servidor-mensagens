@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.31 (GROUP RECOVERY)
- * ESTABILIZAÇÃO TOTAL: Restauração de Grupos, Smart Update e Mídia HD.
+ * NOCTIS MESSENGER - SERVER V20.32 (MASTER RESTORATION)
+ * ESTABILIZAÇÃO TOTAL: Restauração de Rotas Perdidas, Gestão de Grupos e Master Control.
  */
 
 const express = require('express');
@@ -29,13 +29,10 @@ let latestApkName = "";
 const rawConfig = process.env.FIREBASE_CONFIG;
 if (rawConfig) {
     try {
-        // Limpeza profunda para evitar erro "Bad control character"
         let sanitized = rawConfig.trim();
-        // Se a string estiver envolvida em aspas por erro, remove
         if (sanitized.startsWith('"') && sanitized.endsWith('"')) {
             sanitized = sanitized.substring(1, sanitized.length - 1);
         }
-        // Corrige quebras de linha literais da chave privada
         sanitized = sanitized.replace(/\n/g, '\\n');
 
         const serviceAccount = JSON.parse(sanitized);
@@ -44,7 +41,6 @@ if (rawConfig) {
         }
         firebaseStatus = "Conectado! 🔥";
     } catch (err) {
-        // Se falhar a primeira, tenta uma segunda limpeza de emergência
         try {
             const cleanAgain = rawConfig.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
             const serviceAccount = JSON.parse(cleanAgain);
@@ -60,10 +56,7 @@ if (rawConfig) {
 const db = (admin.apps.length > 0) ? admin.firestore() : null;
 
 // --- BACKBLAZE B2 ---
-const b2 = new B2({
-    applicationKeyId: process.env.B2_KEY_ID || '',
-    applicationKey: process.env.B2_APP_KEY || ''
-});
+const b2 = new B2({ applicationKeyId: process.env.B2_KEY_ID || '', applicationKey: process.env.B2_APP_KEY || '' });
 const B2_BUCKET_ID = process.env.B2_BUCKET_ID;
 
 async function initB2() {
@@ -90,7 +83,6 @@ async function loadDataFromBackup() {
         const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(2000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
 
-        // Recupera versão global do Firebase se existir
         const configDoc = await db.collection('system').doc('config').get();
         if (configDoc.exists) {
             latestVersionCode = configDoc.data().versionCode || 1;
@@ -123,21 +115,16 @@ app.use(bodyParser.json({ limit: '100mb' }));
 
 app.post('/admin/update_version', async (req, res) => {
     const { versionCode, apkName, password } = req.body;
-    // Senha simples para evitar abusos (pode mudar para uma env se quiser)
     if (password !== "pedropvh133@gmail.com/admin") return res.status(403).send('Negado');
 
     latestVersionCode = parseInt(versionCode);
     latestApkName = apkName;
-
     res.json({ status: 'ok', versionCode: latestVersionCode, apkName: latestApkName });
 
-    // Salva no Firebase para persistir após restart do Render
-    if (db) {
-        db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName }).catch(() => {});
-    }
+    if (db) db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName }).catch(() => {});
 });
 
-// --- ROTAS DE USUÁRIO ---
+// --- USUÁRIO & SEGURANÇA ---
 
 app.post('/register', async (req, res) => {
     const { username, password } = req.body;
@@ -172,7 +159,33 @@ app.post('/user/update_pic', async (req, res) => {
     } else res.status(500).send('B2 Error');
 });
 
-// --- ROTAS DE GRUPOS ---
+app.post('/user/block', (req, res) => {
+    const { username, target } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        if (!user.blockedUsers) user.blockedUsers = [];
+        if (!user.blockedUsers.includes(target)) user.blockedUsers.push(target);
+        res.json({ status: 'ok', list: user.blockedUsers });
+        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
+    } else res.status(404).send('Not found');
+});
+
+app.post('/user/unblock', (req, res) => {
+    const { username, target } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user && user.blockedUsers) {
+        user.blockedUsers = user.blockedUsers.filter(u => u !== target);
+        res.json({ status: 'ok', list: user.blockedUsers });
+        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
+    } else res.status(404).send('Not found');
+});
+
+app.get('/user/blocked_list/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    res.json(user ? (user.blockedUsers || []) : []);
+});
+
+// --- GRUPOS ---
 
 app.post('/create_group', async (req, res) => {
     const { name, creator, description, rules } = req.body;
@@ -255,7 +268,7 @@ app.post('/group/delete', (req, res) => {
     } else res.status(403).send('Erro');
 });
 
-// --- MENSAGENS ---
+// --- MENSAGENS & GESTÃO ---
 
 app.post('/send_message', async (req, res) => {
     const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
@@ -292,16 +305,77 @@ app.get('/conversation/:u1/:u2', (req, res) => {
     res.json(list);
 });
 
-// --- SINALIZAÇÃO E ATUALIZAÇÃO ---
+app.get('/group/messages/:groupId', (req, res) => {
+    res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId));
+});
+
+app.get('/messages/unread/:username', (req, res) => {
+    const me = req.params.username;
+    const myGroupsList = groups.filter(g => g.members.includes(me));
+    const unread = messages.filter(m => {
+        const isToMe = !m.isGroup && m.to === me;
+        const isToMyGroup = m.isGroup && myGroupsList.find(g => g.id === m.to) && m.from !== me;
+        return (isToMe || isToMyGroup) && !m.read;
+    }).map(m => {
+        if (m.isGroup) {
+            const grp = myGroupsList.find(g => g.id === m.to);
+            return { ...m, groupName: grp ? grp.name : "Grupo" };
+        }
+        return m;
+    });
+    res.json(unread);
+});
+
+app.post('/mark_read', (req, res) => {
+    const { username, contact } = req.body;
+    messages.forEach(m => {
+        if (!m.isGroup && m.from === contact && m.to === username) m.read = true;
+    });
+    res.json({ status: 'ok' });
+    if (db) {
+        messages.filter(m => !m.isGroup && m.from === contact && m.to === username).forEach(m => {
+            db.collection('messages').doc(m.id.toString()).update({ read: true }).catch(() => {});
+        });
+    }
+});
+
+app.post('/delete_message', (req, res) => {
+    const { messageId, username } = req.body;
+    const index = messages.findIndex(m => m.id == messageId && m.from === username);
+    if (index !== -1) {
+        messages.splice(index, 1);
+        res.json({ status: 'ok' });
+        if (db) db.collection('messages').doc(messageId.toString()).delete().catch(() => {});
+    } else res.status(403).send('Erro');
+});
+
+app.post('/destroy_view_once', (req, res) => {
+    const { messageId, username } = req.body;
+    const msg = messages.find(m => m.id == messageId && m.to === username && m.viewOnce);
+    if (msg) {
+        msg.content = "FOTO_AUTODESTRUIDA";
+        msg.isImage = false; msg.isVideo = false; msg.isAudio = false;
+        res.json({ status: 'ok' });
+        if (db) db.collection('messages').doc(messageId.toString()).update({ content: "FOTO_AUTODESTRUIDA", isImage: false, isVideo: false, isAudio: false }).catch(() => {});
+    } else res.status(404).send('Off');
+});
+
+app.post('/clear_messages', (req, res) => {
+    const { username, password } = req.body;
+    const user = users.find(u => u.username === username && u.password === password);
+    if (user) {
+        messages = messages.filter(m => m.from !== username && m.to !== username);
+        res.json({ status: 'ok' });
+    } else res.status(401).send('Erro');
+});
+
+// --- SINALIZAÇÃO & ATUALIZAÇÃO ---
 
 app.get('/call/check/:username', (req, res) => {
     const signals = callSignals[req.params.username] || [];
     callSignals[req.params.username] = [];
-
-    // Pega Carona (Piggybacking) da versão no Header
     res.set('X-Latest-Version', latestVersionCode);
     res.set('X-Apk-Name', latestApkName);
-
     res.json(signals);
 });
 
@@ -355,35 +429,26 @@ app.get('/admin', (req, res) => {
         <body style="background: #0A0E14; color: white; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
             <div style="background: rgba(30, 41, 59, 0.7); padding: 40px; border-radius: 20px; border: 1px solid #00D2FF; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); backdrop-filter: blur(10px); width: 400px; text-align: center;">
                 <h1 style="color: #00D2FF; margin-bottom: 30px; letter-spacing: 2px;">🛰️ MASTER CONTROL</h1>
-
                 <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 10px; margin-bottom: 25px; text-align: left; font-size: 14px;">
                     <p style="margin: 5px 0;">🔥 Firebase: <span style="color: #00F260">${firebaseStatus}</span></p>
                     <p style="margin: 5px 0;">☁️ B2 Cloud: <span style="color: #00F260">${b2Status}</span></p>
                     <p style="margin: 5px 0;">📱 Versão Atual: <span style="color: #FF00FF">${latestVersionCode}</span></p>
                 </div>
-
                 <div style="display: flex; flex-direction: column; gap: 15px;">
-                    <input id="vCode" type="number" placeholder="Código da Versão (Ex: 2)" style="background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none;">
-                    <input id="apkName" type="text" placeholder="Nome do APK (Ex: noctis_v2.apk)" style="background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none;">
+                    <input id="vCode" type="number" placeholder="Código da Versão" style="background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none;">
+                    <input id="apkName" type="text" placeholder="Nome do APK" style="background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none;">
                     <input id="pass" type="password" placeholder="Senha Master" style="background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none;">
-
-                    <button onclick="launchUpdate()" style="background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; border: none; padding: 15px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 10px;">
-                        🚀 LANÇAR ATUALIZAÇÃO
-                    </button>
+                    <button onclick="launchUpdate()" style="background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; border: none; padding: 15px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 10px;">🚀 LANÇAR ATUALIZAÇÃO</button>
                 </div>
-
                 <p id="msg" style="margin-top: 20px; font-size: 12px; color: #94A3B8;"></p>
             </div>
-
             <script>
                 async function launchUpdate() {
                     const v = document.getElementById('vCode').value;
                     const n = document.getElementById('apkName').value;
                     const p = document.getElementById('pass').value;
                     const msg = document.getElementById('msg');
-
                     if(!v || !n || !p) { msg.innerText = "⚠️ Preencha todos os campos"; return; }
-
                     msg.innerText = "📡 Enviando sinal...";
                     try {
                         const r = await fetch('/admin/update_version', {
@@ -393,13 +458,13 @@ app.get('/admin', (req, res) => {
                         });
                         if(r.ok) {
                             msg.style.color = "#00F260";
-                            msg.innerText = "✅ SUCESSO! Todos os usuários serão notificados.";
+                            msg.innerText = "✅ SUCESSO!";
                             setTimeout(() => location.reload(), 2000);
                         } else {
                             msg.style.color = "#FF4B2B";
-                            msg.innerText = "❌ ERRO: Senha incorreta ou falha no servidor.";
+                            msg.innerText = "❌ ERRO: Senha incorreta.";
                         }
-                    } catch(e) { msg.innerText = "🚫 Falha de conexão."; }
+                    } catch(e) { msg.innerText = "🚫 Falha."; }
                 }
             </script>
         </body>
@@ -407,7 +472,7 @@ app.get('/admin', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.31</h1><p>Update System: Ativo ✅ | Group Recovery: OK ✅</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.32</h1><p>Master Restoration: OK ✅</p>`);
 });
 
-app.listen(port, () => console.log(`Noctis v20.30 pronto.`));
+app.listen(port, () => console.log(`Noctis v20.32 pronto.`));
