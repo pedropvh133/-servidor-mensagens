@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.28 (ELITE STORAGE)
- * ESTABILIZAÇÃO: Fim do 404 em Mídia e Cache de Bucket Inteligente.
+ * NOCTIS MESSENGER - SERVER V20.29 (ALL-IN-ONE)
+ * ESTABILIZAÇÃO TOTAL: Restauração de Grupos, Cache B2 e Sincronia de Mídia.
  */
 
 const express = require('express');
@@ -12,7 +12,7 @@ const B2 = require('backblaze-b2');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// --- ESTADO GLOBAL ---
+// --- ESTADO GLOBAL (RAM) ---
 let users = [];
 let messages = [];
 let groups = [];
@@ -47,17 +47,12 @@ async function initB2() {
     if (!process.env.B2_KEY_ID || !B2_BUCKET_ID) return;
     try {
         await b2.authorize();
-        // Busca o nome do bucket uma única vez para evitar 404 futuro
         const bucketResp = await b2.getBucket({ bucketId: B2_BUCKET_ID });
         if (bucketResp.data.buckets && bucketResp.data.buckets.length > 0) {
             cachedBucketName = bucketResp.data.buckets[0].bucketName;
-            b2Status = `Conectado (${cachedBucketName})! ☁️`;
-            console.log(`B2 OK: Bucket ${cachedBucketName}`);
+            b2Status = "Autorizado! ☁️";
         }
-    } catch (e) {
-        b2Status = "Erro B2 ❌";
-        console.error('Falha B2:', e.message);
-    }
+    } catch (e) { b2Status = "Erro B2 ❌"; }
 }
 initB2();
 
@@ -66,10 +61,14 @@ async function loadDataFromBackup() {
     if (!db) return;
     try {
         const userSnap = await db.collection('users').get();
-        users = userSnap.docs.map(d => d.data());
+        users = userSnap.docs.map(d => {
+            const data = d.data();
+            if (!data.blockedUsers) data.blockedUsers = [];
+            return data;
+        });
         const groupSnap = await db.collection('groups').get();
         groups = groupSnap.docs.map(d => d.data());
-        const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(1000).get();
+        const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(2000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
     } catch (e) { console.error('Erro Backup'); }
 }
@@ -94,17 +93,33 @@ async function uploadToB2(base64Data, fileName) {
 app.use(cors());
 app.use(bodyParser.json({ limit: '100mb' }));
 
-// --- ROTAS ---
+// --- ROTAS DE USUÁRIO ---
+
+app.post('/register', async (req, res) => {
+    const { username, password } = req.body;
+    if (users.find(u => u.username === username)) return res.status(400).json({ error: 'USUÁRIO_JÁ_EXISTE' });
+    const newUser = { username, password, bio: 'Olá!', profilePic: null, lastSeen: Date.now(), blockedUsers: [] };
+    users.push(newUser);
+    res.status(201).json({ status: 'ok' });
+    if (db) db.collection('users').doc(username).set(newUser).catch(() => {});
+});
+
+app.post('/login', (req, res) => {
+    const { username, password } = req.body;
+    const user = users.find(u => u.username === username);
+    if (!user) return res.status(404).json({ error: 'NÃO_ENCONTRADO' });
+    if (user.password === password) {
+        user.lastSeen = Date.now();
+        res.status(200).json({ status: 'ok', ...user });
+        if (db) db.collection('users').doc(username).update({ lastSeen: Date.now() }).catch(() => {});
+    } else res.status(401).json({ error: 'SENHA_INCORRETA' });
+});
 
 app.post('/user/update_pic', async (req, res) => {
     const { username, profilePic } = req.body;
     const b2Url = await uploadToB2(profilePic, `profile_${username}_${Date.now()}`);
     if (b2Url) {
         let user = users.find(u => u.username === username);
-        if (!user && db) { // Tenta Firestore se não na RAM
-            const doc = await db.collection('users').doc(username).get();
-            if (doc.exists) { user = doc.data(); users.push(user); }
-        }
         if (user) {
             user.profilePic = b2Url;
             res.status(200).json({ status: 'ok' });
@@ -113,21 +128,100 @@ app.post('/user/update_pic', async (req, res) => {
     } else res.status(500).send('B2 Error');
 });
 
-app.get('/b2file/:filename', async (req, res) => {
-    try {
-        if (!cachedBucketName) await initB2();
-        const downloadResp = await b2.downloadFileByName({
-            bucketName: cachedBucketName,
-            fileName: req.params.filename,
-            responseType: 'arraybuffer'
-        });
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.send(Buffer.from(downloadResp.data));
-    } catch (e) {
-        console.error('B2 Download Err:', e.message);
-        res.status(404).send('Off');
-    }
+app.post('/user/delete_account', (req, res) => {
+    const { username, password } = req.body;
+    const index = users.findIndex(u => u.username === username && u.password === password);
+    if (index !== -1) {
+        users.splice(index, 1);
+        res.status(200).json({ status: 'ok' });
+        if (db) db.collection('users').doc(username).delete().catch(() => {});
+    } else res.status(401).send('Erro');
 });
+
+// --- ROTAS DE GRUPOS ---
+
+app.post('/create_group', async (req, res) => {
+    const { name, creator, description, rules } = req.body;
+    const groupId = 'group_' + Date.now();
+    const newGroup = { id: groupId, name, creator, members: [creator], admins: [creator], profilePic: null, description: description || "", rules: rules || "" };
+    groups.push(newGroup);
+    res.status(201).json(newGroup);
+    if (db) db.collection('groups').doc(groupId).set(newGroup).catch(() => {});
+});
+
+app.get('/groups/:username', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.username))));
+
+app.post('/group/add_member', (req, res) => {
+    const { groupId, adminUser, newMember } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        if (!group.members.includes(newMember)) group.members.push(newMember);
+        if (!callSignals[newMember]) callSignals[newMember] = [];
+        callSignals[newMember].push({ from: adminUser, data: Buffer.from(`ADDED_TO_GROUP:${group.name}`).toString('base64'), time: Date.now() });
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({ members: group.members });
+    } else res.status(403).send('Erro');
+});
+
+app.post('/group/remove_member', (req, res) => {
+    const { groupId, adminUser, targetUser } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        group.members = group.members.filter(m => m !== targetUser);
+        group.admins = group.admins.filter(a => a !== targetUser);
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({ members: group.members, admins: group.admins }).catch(() => {});
+    } else res.status(403).send('Erro');
+});
+
+app.post('/group/promote', (req, res) => {
+    const { groupId, adminUser, targetUser } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        if (!group.admins.includes(targetUser)) group.admins.push(targetUser);
+        if (!callSignals[targetUser]) callSignals[targetUser] = [];
+        callSignals[targetUser].push({ from: adminUser, data: Buffer.from(`PROMOTED_TO_ADMIN:${groupId}`).toString('base64'), time: Date.now() });
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({ admins: group.admins }).catch(() => {});
+    } else res.status(403).send('Erro');
+});
+
+app.post(['/group/update_name', '/group/update_settings'], (req, res) => {
+    const { groupId, adminUser, name, description, rules } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        if (name) group.name = name;
+        if (description !== undefined) group.description = description;
+        if (rules !== undefined) group.rules = rules;
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({ name: group.name, description: group.description, rules: group.rules }).catch(() => {});
+    } else res.status(403).send('Erro');
+});
+
+app.post('/group/update_pic', async (req, res) => {
+    const { groupId, adminUser, profilePic } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        const b2Url = await uploadToB2(profilePic, `group_${groupId}_${Date.now()}`);
+        if (b2Url) {
+            group.profilePic = b2Url;
+            res.status(200).json(group);
+            if (db) db.collection('groups').doc(groupId).update({ profilePic: b2Url }).catch(() => {});
+        } else res.status(500).send('B2 Error');
+    } else res.status(403).send('Erro');
+});
+
+app.post('/group/delete', (req, res) => {
+    const { groupId, adminUser } = req.body;
+    const index = groups.findIndex(g => g.id === groupId);
+    if (index !== -1 && groups[index].admins.includes(adminUser)) {
+        groups.splice(index, 1);
+        res.status(200).json({ status: 'ok' });
+        if (db) db.collection('groups').doc(groupId).delete().catch(() => {});
+    } else res.status(403).send('Erro');
+});
+
+// --- MENSAGENS ---
 
 app.post('/send_message', async (req, res) => {
     const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
@@ -141,6 +235,7 @@ app.post('/send_message', async (req, res) => {
     }
     const msgData = { id: Date.now(), from: username, to: recipient, content: finalContent, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false };
     messages.push(msgData);
+    if (messages.length > 5000) messages.shift();
     res.status(200).json({ status: 'ok' });
     if (db) db.collection('messages').doc(msgData.id.toString()).set(msgData).catch(() => {});
 });
@@ -163,6 +258,77 @@ app.get('/conversation/:u1/:u2', (req, res) => {
     res.json(list);
 });
 
+app.get('/group/messages/:groupId', (req, res) => {
+    res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId));
+});
+
+app.get('/messages/unread/:username', (req, res) => {
+    const me = req.params.username;
+    const myGroupsList = groups.filter(g => g.members.includes(me));
+    const unread = messages.filter(m => {
+        const isToMe = !m.isGroup && m.to === me;
+        const isToMyGroup = m.isGroup && myGroupsList.find(g => g.id === m.to) && m.from !== me;
+        return (isToMe || isToMyGroup) && !m.read;
+    }).map(m => {
+        if (m.isGroup) {
+            const grp = myGroupsList.find(g => g.id === m.to);
+            return { ...m, groupName: grp ? grp.name : "Grupo" };
+        }
+        return m;
+    });
+    res.json(unread);
+});
+
+// --- SEGURANÇA E SINALIZAÇÃO ---
+
+app.post('/delete_message', (req, res) => {
+    const { messageId, username } = req.body;
+    const index = messages.findIndex(m => m.id == messageId && m.from === username);
+    if (index !== -1) {
+        messages.splice(index, 1);
+        res.json({ status: 'ok' });
+        if (db) db.collection('messages').doc(messageId.toString()).delete().catch(() => {});
+    } else res.status(403).send('Erro');
+});
+
+app.get('/b2file/:filename', async (req, res) => {
+    try {
+        if (!cachedBucketName) await initB2();
+        const downloadResp = await b2.downloadFileByName({
+            bucketName: cachedBucketName,
+            fileName: req.params.filename,
+            responseType: 'arraybuffer'
+        });
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.send(Buffer.from(downloadResp.data));
+    } catch (e) { res.status(404).send('Off'); }
+});
+
+app.post('/call/signal', async (req, res) => {
+    const { to, from, data } = req.body;
+    if (to.startsWith('group_')) {
+        const group = groups.find(g => g.id === to);
+        if (group) {
+            group.members.forEach(member => {
+                if (member !== from) {
+                    if (!callSignals[member]) callSignals[member] = [];
+                    callSignals[member].push({ from, data, groupName: group.name, time: Date.now() });
+                }
+            });
+            return res.json({ status: 'ok' });
+        }
+    }
+    if (!callSignals[to]) callSignals[to] = [];
+    callSignals[to].push({ from, data, time: Date.now() });
+    res.json({ status: 'ok' });
+});
+
+app.get('/call/check/:username', (req, res) => {
+    const signals = callSignals[req.params.username] || [];
+    callSignals[req.params.username] = [];
+    res.json(signals);
+});
+
 app.get('/status/:username', (req, res) => {
     const user = users.find(u => u.username === req.params.username);
     if (!user) return res.json({ status: 'OFFLINE' });
@@ -176,29 +342,8 @@ app.get('/user/info/:username', (req, res) => {
     else res.status(404).send('Not found');
 });
 
-// Outras rotas (login, register, group actions...) mantidas conforme v20.27
-app.post('/register', async (req, res) => {
-    const { username, password } = req.body;
-    if (users.find(u => u.username === username)) return res.status(400).json({ error: 'USUÁRIO_JÁ_EXISTE' });
-    const newUser = { username, password, bio: 'Olá!', profilePic: null, lastSeen: Date.now(), blockedUsers: [] };
-    users.push(newUser);
-    res.status(201).json({ status: 'ok' });
-    if (db) db.collection('users').doc(username).set(newUser).catch(() => {});
-});
-
-app.post('/login', (req, res) => {
-    const { username, password } = req.body;
-    const user = users.find(u => u.username === username);
-    if (!user) return res.status(404).json({ error: 'NÃO_ENCONTRADO' });
-    if (user.password === password) {
-        user.lastSeen = Date.now();
-        res.status(200).json({ status: 'ok', ...user });
-        if (db) db.collection('users').doc(username).update({ lastSeen: Date.now() }).catch(() => {});
-    } else res.status(401).json({ error: 'SENHA_INCORRETA' });
-});
-
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.28</h1><p>Firebase OK! B2 Status: ${b2Status}</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.29</h1><p>Status: All-In-One Ativo ✅</p>`);
 });
 
-app.listen(port, () => console.log(`Noctis pronto na porta ${port}`));
+app.listen(port, () => console.log(`Noctis v20.29 pronto.`));
