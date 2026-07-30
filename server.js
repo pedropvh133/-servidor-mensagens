@@ -1,5 +1,7 @@
- * NOCTIS MESSENGER - SERVER V20.33 (TRIPLE CHECK)
- * ESTABILIZAÇÃO TOTAL: Status de Enviado, Entregue e Lido com Cores.
+/**
+ * NOCTIS MESSENGER - SERVER V20.34 (STABILITY FIX)
+ * ESTABILIZAÇÃO TOTAL: Correção de Cabeçalho, Limpeza de JSON e Triple Check.
+ */
 
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -23,15 +25,18 @@ let cachedBucketName = null;
 let latestVersionCode = 1;
 let latestApkName = "";
 
-// --- FIREBASE CONFIG ---
+// --- FIREBASE CONFIG (LIMPEZA ULTRA) ---
 const rawConfig = process.env.FIREBASE_CONFIG;
 if (rawConfig) {
     try {
-        let sanitized = rawConfig.trim();
+        // Remove caracteres de controle, quebras de linha e espaços extras
+        let sanitized = rawConfig.trim()
+            .replace(/[\u0000-\u001F\u007F-\u009F]/g, "")
+            .replace(/\\n/g, "\n");
+
         if (sanitized.startsWith('"') && sanitized.endsWith('"')) {
             sanitized = sanitized.substring(1, sanitized.length - 1);
         }
-        sanitized = sanitized.replace(/\n/g, '\\n');
 
         const serviceAccount = JSON.parse(sanitized);
         if (admin.apps.length === 0) {
@@ -39,16 +44,7 @@ if (rawConfig) {
         }
         firebaseStatus = "Conectado! 🔥";
     } catch (err) {
-        try {
-            const cleanAgain = rawConfig.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
-            const serviceAccount = JSON.parse(cleanAgain);
-            if (admin.apps.length === 0) {
-                admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-            }
-            firebaseStatus = "Conectado! 🔥";
-        } catch (err2) {
-            firebaseStatus = `Erro JSON: ${err2.message} ❌`;
-        }
+        firebaseStatus = `Erro Config: ${err.message} ❌`;
     }
 }
 const db = (admin.apps.length > 0) ? admin.firestore() : null;
@@ -122,7 +118,7 @@ app.post('/admin/update_version', async (req, res) => {
     if (db) db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName }).catch(() => {});
 });
 
-// --- USUÁRIO & SEGURANÇA ---
+// --- USUÁRIO ---
 
 app.post('/register', async (req, res) => {
     const { username, password } = req.body;
@@ -156,6 +152,8 @@ app.post('/user/update_pic', async (req, res) => {
         } else res.status(404).send('Not found');
     } else res.status(500).send('B2 Error');
 });
+
+// --- SEGURANÇA ---
 
 app.post('/user/block', (req, res) => {
     const { username, target } = req.body;
@@ -266,7 +264,7 @@ app.post('/group/delete', (req, res) => {
     } else res.status(403).send('Erro');
 });
 
-// --- MENSAGENS & GESTÃO ---
+// --- MENSAGENS ---
 
 app.post('/send_message', async (req, res) => {
     const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
@@ -300,15 +298,12 @@ app.get('/conversations/list/:username', (req, res) => {
 
 app.get('/conversation/:u1/:u2', (req, res) => {
     const list = messages.filter(m => !m.isGroup && ((m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1)));
-
-    // Marca como entregues se o destinatário está puxando a conversa
     messages.forEach(m => {
         if (!m.isGroup && m.from === req.params.u2 && m.to === req.params.u1) {
             m.delivered = true;
             if (db) db.collection('messages').doc(m.id.toString()).update({ delivered: true }).catch(() => {});
         }
     });
-
     res.json(list);
 });
 
@@ -324,7 +319,6 @@ app.get('/messages/unread/:username', (req, res) => {
         const isToMyGroup = m.isGroup && myGroupsList.find(g => g.id === m.to) && m.from !== me;
         return (isToMe || isToMyGroup) && !m.read;
     }).map(m => {
-        // Marca como entregue ao ser enviada pro dispositivo
         if(!m.delivered) {
             m.delivered = true;
             if (db) db.collection('messages').doc(m.id.toString()).update({ delivered: true }).catch(() => {});
@@ -386,7 +380,7 @@ app.post('/clear_messages', (req, res) => {
 app.get('/call/check/:username', (req, res) => {
     const signals = callSignals[req.params.username] || [];
     callSignals[req.params.username] = [];
-    res.set('X-Latest-Version', latestVersionCode);
+    res.set('X-Latest-Version', latestVersionCode.toString());
     res.set('X-Apk-Name', latestApkName);
     res.json(signals);
 });
@@ -484,7 +478,7 @@ app.get('/admin', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.33</h1><p>Triple Check System: Ativo ✅</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.34</h1><p>Stability Master: Ativo ✅</p>`);
 });
 
-app.listen(port, () => console.log(`Noctis v20.32 pronto.`));
+app.listen(port, () => console.log(`Noctis v20.34 pronto.`));
