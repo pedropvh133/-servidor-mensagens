@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.29 (ALL-IN-ONE)
- * ESTABILIZAÇÃO TOTAL: Restauração de Grupos, Cache B2 e Sincronia de Mídia.
+ * NOCTIS MESSENGER - SERVER V20.30 (SMART UPDATE)
+ * ESTABILIZAÇÃO TOTAL: Sistema de Atualização por Sinalização e Gestão de Mídia.
  */
 
 const express = require('express');
@@ -20,6 +20,10 @@ let callSignals = {};
 let firebaseStatus = "Aguardando... ⚪";
 let b2Status = "Aguardando... ⚪";
 let cachedBucketName = null;
+
+// --- CONTROLE DE VERSÃO ---
+let latestVersionCode = 1;
+let latestApkName = "";
 
 // --- FIREBASE CONFIG ---
 const rawConfig = process.env.FIREBASE_CONFIG;
@@ -61,15 +65,18 @@ async function loadDataFromBackup() {
     if (!db) return;
     try {
         const userSnap = await db.collection('users').get();
-        users = userSnap.docs.map(d => {
-            const data = d.data();
-            if (!data.blockedUsers) data.blockedUsers = [];
-            return data;
-        });
+        users = userSnap.docs.map(d => d.data());
         const groupSnap = await db.collection('groups').get();
         groups = groupSnap.docs.map(d => d.data());
         const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(2000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
+
+        // Recupera versão global do Firebase se existir
+        const configDoc = await db.collection('system').doc('config').get();
+        if (configDoc.exists) {
+            latestVersionCode = configDoc.data().versionCode || 1;
+            latestApkName = configDoc.data().apkName || "";
+        }
     } catch (e) { console.error('Erro Backup'); }
 }
 loadDataFromBackup();
@@ -92,6 +99,24 @@ async function uploadToB2(base64Data, fileName) {
 
 app.use(cors());
 app.use(bodyParser.json({ limit: '100mb' }));
+
+// --- ADMIN / ATUALIZAÇÃO ---
+
+app.post('/admin/update_version', async (req, res) => {
+    const { versionCode, apkName, password } = req.body;
+    // Senha simples para evitar abusos (pode mudar para uma env se quiser)
+    if (password !== "noctis_admin") return res.status(403).send('Negado');
+
+    latestVersionCode = parseInt(versionCode);
+    latestApkName = apkName;
+
+    res.json({ status: 'ok', versionCode: latestVersionCode, apkName: latestApkName });
+
+    // Salva no Firebase para persistir após restart do Render
+    if (db) {
+        db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName }).catch(() => {});
+    }
+});
 
 // --- ROTAS DE USUÁRIO ---
 
@@ -128,16 +153,6 @@ app.post('/user/update_pic', async (req, res) => {
     } else res.status(500).send('B2 Error');
 });
 
-app.post('/user/delete_account', (req, res) => {
-    const { username, password } = req.body;
-    const index = users.findIndex(u => u.username === username && u.password === password);
-    if (index !== -1) {
-        users.splice(index, 1);
-        res.status(200).json({ status: 'ok' });
-        if (db) db.collection('users').doc(username).delete().catch(() => {});
-    } else res.status(401).send('Erro');
-});
-
 // --- ROTAS DE GRUPOS ---
 
 app.post('/create_group', async (req, res) => {
@@ -160,64 +175,6 @@ app.post('/group/add_member', (req, res) => {
         callSignals[newMember].push({ from: adminUser, data: Buffer.from(`ADDED_TO_GROUP:${group.name}`).toString('base64'), time: Date.now() });
         res.status(200).json(group);
         if (db) db.collection('groups').doc(groupId).update({ members: group.members });
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/remove_member', (req, res) => {
-    const { groupId, adminUser, targetUser } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        group.members = group.members.filter(m => m !== targetUser);
-        group.admins = group.admins.filter(a => a !== targetUser);
-        res.status(200).json(group);
-        if (db) db.collection('groups').doc(groupId).update({ members: group.members, admins: group.admins }).catch(() => {});
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/promote', (req, res) => {
-    const { groupId, adminUser, targetUser } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        if (!group.admins.includes(targetUser)) group.admins.push(targetUser);
-        if (!callSignals[targetUser]) callSignals[targetUser] = [];
-        callSignals[targetUser].push({ from: adminUser, data: Buffer.from(`PROMOTED_TO_ADMIN:${groupId}`).toString('base64'), time: Date.now() });
-        res.status(200).json(group);
-        if (db) db.collection('groups').doc(groupId).update({ admins: group.admins }).catch(() => {});
-    } else res.status(403).send('Erro');
-});
-
-app.post(['/group/update_name', '/group/update_settings'], (req, res) => {
-    const { groupId, adminUser, name, description, rules } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        if (name) group.name = name;
-        if (description !== undefined) group.description = description;
-        if (rules !== undefined) group.rules = rules;
-        res.status(200).json(group);
-        if (db) db.collection('groups').doc(groupId).update({ name: group.name, description: group.description, rules: group.rules }).catch(() => {});
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/update_pic', async (req, res) => {
-    const { groupId, adminUser, profilePic } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        const b2Url = await uploadToB2(profilePic, `group_${groupId}_${Date.now()}`);
-        if (b2Url) {
-            group.profilePic = b2Url;
-            res.status(200).json(group);
-            if (db) db.collection('groups').doc(groupId).update({ profilePic: b2Url }).catch(() => {});
-        } else res.status(500).send('B2 Error');
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/delete', (req, res) => {
-    const { groupId, adminUser } = req.body;
-    const index = groups.findIndex(g => g.id === groupId);
-    if (index !== -1 && groups[index].admins.includes(adminUser)) {
-        groups.splice(index, 1);
-        res.status(200).json({ status: 'ok' });
-        if (db) db.collection('groups').doc(groupId).delete().catch(() => {});
     } else res.status(403).send('Erro');
 });
 
@@ -258,37 +215,17 @@ app.get('/conversation/:u1/:u2', (req, res) => {
     res.json(list);
 });
 
-app.get('/group/messages/:groupId', (req, res) => {
-    res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId));
-});
+// --- SINALIZAÇÃO E ATUALIZAÇÃO ---
 
-app.get('/messages/unread/:username', (req, res) => {
-    const me = req.params.username;
-    const myGroupsList = groups.filter(g => g.members.includes(me));
-    const unread = messages.filter(m => {
-        const isToMe = !m.isGroup && m.to === me;
-        const isToMyGroup = m.isGroup && myGroupsList.find(g => g.id === m.to) && m.from !== me;
-        return (isToMe || isToMyGroup) && !m.read;
-    }).map(m => {
-        if (m.isGroup) {
-            const grp = myGroupsList.find(g => g.id === m.to);
-            return { ...m, groupName: grp ? grp.name : "Grupo" };
-        }
-        return m;
-    });
-    res.json(unread);
-});
+app.get('/call/check/:username', (req, res) => {
+    const signals = callSignals[req.params.username] || [];
+    callSignals[req.params.username] = [];
 
-// --- SEGURANÇA E SINALIZAÇÃO ---
+    // Pega Carona (Piggybacking) da versão no Header
+    res.set('X-Latest-Version', latestVersionCode);
+    res.set('X-Apk-Name', latestApkName);
 
-app.post('/delete_message', (req, res) => {
-    const { messageId, username } = req.body;
-    const index = messages.findIndex(m => m.id == messageId && m.from === username);
-    if (index !== -1) {
-        messages.splice(index, 1);
-        res.json({ status: 'ok' });
-        if (db) db.collection('messages').doc(messageId.toString()).delete().catch(() => {});
-    } else res.status(403).send('Erro');
+    res.json(signals);
 });
 
 app.get('/b2file/:filename', async (req, res) => {
@@ -323,12 +260,6 @@ app.post('/call/signal', async (req, res) => {
     res.json({ status: 'ok' });
 });
 
-app.get('/call/check/:username', (req, res) => {
-    const signals = callSignals[req.params.username] || [];
-    callSignals[req.params.username] = [];
-    res.json(signals);
-});
-
 app.get('/status/:username', (req, res) => {
     const user = users.find(u => u.username === req.params.username);
     if (!user) return res.json({ status: 'OFFLINE' });
@@ -343,7 +274,7 @@ app.get('/user/info/:username', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.29</h1><p>Status: All-In-One Ativo ✅</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.30</h1><p>Update System: Ativo ✅</p>`);
 });
 
-app.listen(port, () => console.log(`Noctis v20.29 pronto.`));
+app.listen(port, () => console.log(`Noctis v20.30 pronto.`));
