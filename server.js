@@ -273,6 +273,62 @@ app.get('/user/info/:username', (req, res) => {
     else res.status(404).send('Not found');
 });
 
+app.get('/admin', (req, res) => {
+    res.send(`
+        <body style="background: #0A0E14; color: white; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+            <div style="background: rgba(30, 41, 59, 0.7); padding: 40px; border-radius: 20px; border: 1px solid #00D2FF; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); backdrop-filter: blur(10px); width: 400px; text-align: center;">
+                <h1 style="color: #00D2FF; margin-bottom: 30px; letter-spacing: 2px;">🛰️ MASTER CONTROL</h1>
+
+                <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 10px; margin-bottom: 25px; text-align: left; font-size: 14px;">
+                    <p style="margin: 5px 0;">🔥 Firebase: <span style="color: #00F260">${firebaseStatus}</span></p>
+                    <p style="margin: 5px 0;">☁️ B2 Cloud: <span style="color: #00F260">${b2Status}</span></p>
+                    <p style="margin: 5px 0;">📱 Versão Atual: <span style="color: #FF00FF">${latestVersionCode}</span></p>
+                </div>
+
+                <div style="display: flex; flex-direction: column; gap: 15px;">
+                    <input id="vCode" type="number" placeholder="Código da Versão (Ex: 2)" style="background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none;">
+                    <input id="apkName" type="text" placeholder="Nome do APK (Ex: noctis_v2.apk)" style="background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none;">
+                    <input id="pass" type="password" placeholder="Senha Master" style="background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none;">
+
+                    <button onclick="launchUpdate()" style="background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; border: none; padding: 15px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 10px;">
+                        🚀 LANÇAR ATUALIZAÇÃO
+                    </button>
+                </div>
+
+                <p id="msg" style="margin-top: 20px; font-size: 12px; color: #94A3B8;"></p>
+            </div>
+
+            <script>
+                async function launchUpdate() {
+                    const v = document.getElementById('vCode').value;
+                    const n = document.getElementById('apkName').value;
+                    const p = document.getElementById('pass').value;
+                    const msg = document.getElementById('msg');
+
+                    if(!v || !n || !p) { msg.innerText = "⚠️ Preencha todos os campos"; return; }
+
+                    msg.innerText = "📡 Enviando sinal...";
+                    try {
+                        const r = await fetch('/admin/update_version', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ versionCode: v, apkName: n, password: p })
+                        });
+                        if(r.ok) {
+                            msg.style.color = "#00F260";
+                            msg.innerText = "✅ SUCESSO! Todos os usuários serão notificados.";
+                            setTimeout(() => location.reload(), 2000);
+                        } else {
+                            msg.style.color = "#FF4B2B";
+                            msg.innerText = "❌ ERRO: Senha incorreta ou falha no servidor.";
+                        }
+                    } catch(e) { msg.innerText = "🚫 Falha de conexão."; }
+                }
+            </script>
+        </body>
+    `);
+});
+
 app.get('/', (req, res) => {
     res.send(`<h1>🛰️ NOCTIS Hybrid v20.30</h1><p>Update System: Ativo ✅</p>`);
 });
