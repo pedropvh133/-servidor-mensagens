@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.25 (B2 ROBUSTNESS)
- * ESTABILIZAÇÃO: Correção de Erro 401 e Melhoria de Sincronia de Mídia.
+ * NOCTIS MESSENGER - SERVER V20.27 (ULTRA HD & MASTER CONTROL)
+ * ESTABILIZAÇÃO: Câmera HD, Qualidade Premium e Deleção Blindada.
  */
 
 const express = require('express');
@@ -28,30 +28,23 @@ if (rawConfig) {
         let clean = rawConfig.trim();
         let sanitized = clean.replace(/[\u0000-\u001F\u007F-\u009F]/g, "").replace(/\\n/g, '\n');
         const serviceAccount = JSON.parse(sanitized);
-        if (admin.apps.length === 0) {
-            admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-        }
+        if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
         firebaseStatus = "Conectado! 🔥";
     } catch (err) { firebaseStatus = `Erro no JSON: ${err.message} ❌`; }
 }
 const db = (admin.apps.length > 0) ? admin.firestore() : null;
 
-// --- BACKBLAZE B2 CONFIG ---
-const b2 = new B2({
-    applicationKeyId: process.env.B2_KEY_ID || '',
-    applicationKey: process.env.B2_APP_KEY || ''
-});
+// --- BACKBLAZE B2 ---
+const b2 = new B2({ applicationKeyId: process.env.B2_KEY_ID || '', applicationKey: process.env.B2_APP_KEY || '' });
 const B2_BUCKET_ID = process.env.B2_BUCKET_ID;
 
-// Função para garantir que o B2 está autorizado antes de cada operação importante
 async function ensureB2() {
     try {
         await b2.authorize();
         b2Status = "Autorizado! ☁️";
         return true;
     } catch (e) {
-        console.error('Falha na autorização B2:', e.message);
-        b2Status = "Erro de Chaves! ❌";
+        b2Status = "Erro B2 ❌";
         return false;
     }
 }
@@ -69,7 +62,7 @@ async function loadDataFromBackup() {
         });
         const groupSnap = await db.collection('groups').get();
         groups = groupSnap.docs.map(d => d.data());
-        const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(1000).get();
+        const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(2000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
         backupInfo = `${users.length} usuários e ${groups.length} grupos recuperados. ✅`;
     } catch (e) { backupInfo = "Erro no backup. ⚠️"; }
@@ -89,16 +82,13 @@ async function uploadToB2(base64Data, fileName) {
             data: Buffer.from(base64Data, 'base64')
         });
         return `B2_URL:${uploadResp.data.fileName}`;
-    } catch (e) {
-        console.error('Falha de Upload:', e.message);
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
 app.use(cors());
 app.use(bodyParser.json({ limit: '100mb' }));
 
-// --- ROTAS ---
+// --- ROTAS DE USUÁRIO ---
 
 app.post('/register', async (req, res) => {
     const { username, password } = req.body;
@@ -137,7 +127,7 @@ app.post('/user/update_pic', async (req, res) => {
     } else res.status(500).send('B2 Error');
 });
 
-// --- GRUPOS ---
+// --- ROTAS DE GRUPOS ---
 
 app.post('/create_group', async (req, res) => {
     const { name, creator, description, rules } = req.body;
@@ -149,18 +139,6 @@ app.post('/create_group', async (req, res) => {
 });
 
 app.get('/groups/:username', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.username))));
-
-app.post('/group/add_member', (req, res) => {
-    const { groupId, adminUser, newMember } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        if (!group.members.includes(newMember)) group.members.push(newMember);
-        if (!callSignals[newMember]) callSignals[newMember] = [];
-        callSignals[newMember].push({ from: adminUser, data: Buffer.from(`ADDED_TO_GROUP:${group.name}`).toString('base64'), time: Date.now() });
-        res.status(200).json(group);
-        if (db) db.collection('groups').doc(groupId).update({ members: group.members });
-    } else res.status(403).send('Erro');
-});
 
 app.post(['/group/update_name', '/group/update_settings'], (req, res) => {
     const { groupId, adminUser, name, description, rules } = req.body;
@@ -187,7 +165,7 @@ app.post('/group/update_pic', async (req, res) => {
     } else res.status(403).send('Erro');
 });
 
-// --- MENSAGENS ---
+// --- MENSAGENS E GESTÃO ---
 
 app.post('/send_message', async (req, res) => {
     const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
@@ -201,8 +179,25 @@ app.post('/send_message', async (req, res) => {
     }
     const msgData = { id: Date.now(), from: username, to: recipient, content: finalContent, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false };
     messages.push(msgData);
+    if (messages.length > 5000) messages.shift();
     res.status(200).json({ status: 'ok' });
     if (db) db.collection('messages').doc(msgData.id.toString()).set(msgData).catch(() => {});
+});
+
+app.post('/delete_message', (req, res) => {
+    const { messageId, username } = req.body;
+    console.log(`Tentativa de deletar msg ${messageId} por ${username}`);
+
+    const index = messages.findIndex(m => m.id == messageId && m.from === username);
+    if (index !== -1) {
+        messages.splice(index, 1);
+        res.json({ status: 'ok' });
+        if (db) db.collection('messages').doc(messageId.toString()).delete().catch(() => {});
+        console.log(`Mensagem ${messageId} apagada para todos.`);
+    } else {
+        console.error(`Falha ao deletar: Mensagem não encontrada ou permissão negada.`);
+        res.status(403).send('Não autorizado ou Mensagem inexistente');
+    }
 });
 
 app.get('/conversations/list/:username', (req, res) => {
@@ -244,21 +239,7 @@ app.get('/messages/unread/:username', (req, res) => {
     res.json(unread);
 });
 
-// --- SEGURANÇA E SINALIZAÇÃO ---
-
-app.get('/b2file/:filename', async (req, res) => {
-    try {
-        await ensureB2();
-        const bucketSnap = await b2.getBucket({ bucketId: B2_BUCKET_ID });
-        const downloadResp = await b2.downloadFileByName({
-            bucketName: bucketSnap.data.buckets[0].bucketName,
-            fileName: req.params.filename,
-            responseType: 'arraybuffer'
-        });
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.send(Buffer.from(downloadResp.data));
-    } catch (e) { res.status(404).send('Off'); }
-});
+// --- SINALIZAÇÃO ---
 
 app.post('/call/signal', async (req, res) => {
     const { to, from, data } = req.body;
@@ -286,17 +267,7 @@ app.get('/call/check/:username', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`
-        <body style="background: #0B0E14; color: white; font-family: sans-serif; padding: 40px;">
-            <h1>🛰️ NOCTIS Hybrid v20.25</h1>
-            <div style="background: #1E293B; padding: 20px; border-radius: 10px; border: 1px solid #00D2FF;">
-                <p><b>Google Firebase:</b> ${firebaseStatus}</p>
-                <p><b>Backblaze B2:</b> ${b2Status}</p>
-                <p><b>Persistência:</b> ${backupInfo}</p>
-                <p><b>RAM:</b> ${users.length} usuários | ${groups.length} grupos</p>
-            </div>
-        </body>
-    `);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.27</h1><p>Status: Master Control Ativo ✅</p>`);
 });
 
-app.listen(port, () => console.log(`Noctis v20.25 no ar.`));
+app.listen(port, () => console.log(`Noctis v20.27 pronto.`));
