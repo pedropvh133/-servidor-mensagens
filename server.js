@@ -29,14 +29,33 @@ let latestApkName = "";
 const rawConfig = process.env.FIREBASE_CONFIG;
 if (rawConfig) {
     try {
-        let clean = rawConfig.trim();
-        let sanitized = clean.replace(/[\u0000-\u001F\u007F-\u009F]/g, "").replace(/\\n/g, '\n');
+        // Limpeza profunda para evitar erro "Bad control character"
+        let sanitized = rawConfig.trim();
+        // Se a string estiver envolvida em aspas por erro, remove
+        if (sanitized.startsWith('"') && sanitized.endsWith('"')) {
+            sanitized = sanitized.substring(1, sanitized.length - 1);
+        }
+        // Corrige quebras de linha literais da chave privada
+        sanitized = sanitized.replace(/\n/g, '\\n');
+
         const serviceAccount = JSON.parse(sanitized);
         if (admin.apps.length === 0) {
             admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
         }
         firebaseStatus = "Conectado! 🔥";
-    } catch (err) { firebaseStatus = `Erro JSON: ${err.message} ❌`; }
+    } catch (err) {
+        // Se falhar a primeira, tenta uma segunda limpeza de emergência
+        try {
+            const cleanAgain = rawConfig.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
+            const serviceAccount = JSON.parse(cleanAgain);
+            if (admin.apps.length === 0) {
+                admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+            }
+            firebaseStatus = "Conectado! 🔥";
+        } catch (err2) {
+            firebaseStatus = `Erro JSON: ${err2.message} ❌`;
+        }
+    }
 }
 const db = (admin.apps.length > 0) ? admin.firestore() : null;
 
