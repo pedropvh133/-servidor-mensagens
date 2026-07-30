@@ -1,7 +1,5 @@
-/**
- * NOCTIS MESSENGER - SERVER V20.32 (MASTER RESTORATION)
- * ESTABILIZAÇÃO TOTAL: Restauração de Rotas Perdidas, Gestão de Grupos e Master Control.
- */
+ * NOCTIS MESSENGER - SERVER V20.33 (TRIPLE CHECK)
+ * ESTABILIZAÇÃO TOTAL: Status de Enviado, Entregue e Lido com Cores.
 
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -280,7 +278,7 @@ app.post('/send_message', async (req, res) => {
         const b2Url = await uploadToB2(content, `media_${Date.now()}_${username}`);
         if (b2Url) finalContent = b2Url;
     }
-    const msgData = { id: Date.now(), from: username, to: recipient, content: finalContent, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false };
+    const msgData = { id: Date.now(), from: username, to: recipient, content: finalContent, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false, delivered: false };
     messages.push(msgData);
     if (messages.length > 5000) messages.shift();
     res.status(200).json({ status: 'ok' });
@@ -302,6 +300,15 @@ app.get('/conversations/list/:username', (req, res) => {
 
 app.get('/conversation/:u1/:u2', (req, res) => {
     const list = messages.filter(m => !m.isGroup && ((m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1)));
+
+    // Marca como entregues se o destinatário está puxando a conversa
+    messages.forEach(m => {
+        if (!m.isGroup && m.from === req.params.u2 && m.to === req.params.u1) {
+            m.delivered = true;
+            if (db) db.collection('messages').doc(m.id.toString()).update({ delivered: true }).catch(() => {});
+        }
+    });
+
     res.json(list);
 });
 
@@ -317,6 +324,11 @@ app.get('/messages/unread/:username', (req, res) => {
         const isToMyGroup = m.isGroup && myGroupsList.find(g => g.id === m.to) && m.from !== me;
         return (isToMe || isToMyGroup) && !m.read;
     }).map(m => {
+        // Marca como entregue ao ser enviada pro dispositivo
+        if(!m.delivered) {
+            m.delivered = true;
+            if (db) db.collection('messages').doc(m.id.toString()).update({ delivered: true }).catch(() => {});
+        }
         if (m.isGroup) {
             const grp = myGroupsList.find(g => g.id === m.to);
             return { ...m, groupName: grp ? grp.name : "Grupo" };
@@ -472,7 +484,7 @@ app.get('/admin', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.32</h1><p>Master Restoration: OK ✅</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.33</h1><p>Triple Check System: Ativo ✅</p>`);
 });
 
 app.listen(port, () => console.log(`Noctis v20.32 pronto.`));
