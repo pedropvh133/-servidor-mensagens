@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.30 (SMART UPDATE)
- * ESTABILIZAÇÃO TOTAL: Sistema de Atualização por Sinalização e Gestão de Mídia.
+ * NOCTIS MESSENGER - SERVER V20.31 (GROUP RECOVERY)
+ * ESTABILIZAÇÃO TOTAL: Restauração de Grupos, Smart Update e Mídia HD.
  */
 
 const express = require('express');
@@ -185,6 +185,18 @@ app.post('/create_group', async (req, res) => {
 
 app.get('/groups/:username', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.username))));
 
+app.post(['/group/update_name', '/group/update_settings'], (req, res) => {
+    const { groupId, adminUser, name, description, rules } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        if (name) group.name = name;
+        if (description !== undefined) group.description = description;
+        if (rules !== undefined) group.rules = rules;
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({ name: group.name, description: group.description, rules: group.rules }).catch(() => {});
+    } else res.status(403).send('Erro');
+});
+
 app.post('/group/add_member', (req, res) => {
     const { groupId, adminUser, newMember } = req.body;
     const group = groups.find(g => g.id === groupId);
@@ -194,6 +206,52 @@ app.post('/group/add_member', (req, res) => {
         callSignals[newMember].push({ from: adminUser, data: Buffer.from(`ADDED_TO_GROUP:${group.name}`).toString('base64'), time: Date.now() });
         res.status(200).json(group);
         if (db) db.collection('groups').doc(groupId).update({ members: group.members });
+    } else res.status(403).send('Erro');
+});
+
+app.post('/group/remove_member', (req, res) => {
+    const { groupId, adminUser, targetUser } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        group.members = group.members.filter(m => m !== targetUser);
+        group.admins = group.admins.filter(a => a !== targetUser);
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({ members: group.members, admins: group.admins }).catch(() => {});
+    } else res.status(403).send('Erro');
+});
+
+app.post('/group/promote', (req, res) => {
+    const { groupId, adminUser, targetUser } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        if (!group.admins.includes(targetUser)) group.admins.push(targetUser);
+        if (!callSignals[targetUser]) callSignals[targetUser] = [];
+        callSignals[targetUser].push({ from: adminUser, data: Buffer.from(`PROMOTED_TO_ADMIN:${groupId}`).toString('base64'), time: Date.now() });
+        res.status(200).json(group);
+        if (db) db.collection('groups').doc(groupId).update({ admins: group.admins }).catch(() => {});
+    } else res.status(403).send('Erro');
+});
+
+app.post('/group/update_pic', async (req, res) => {
+    const { groupId, adminUser, profilePic } = req.body;
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.admins.includes(adminUser)) {
+        const b2Url = await uploadToB2(profilePic, `group_${groupId}_${Date.now()}`);
+        if (b2Url) {
+            group.profilePic = b2Url;
+            res.status(200).json(group);
+            if (db) db.collection('groups').doc(groupId).update({ profilePic: b2Url }).catch(() => {});
+        } else res.status(500).send('B2 Error');
+    } else res.status(403).send('Erro');
+});
+
+app.post('/group/delete', (req, res) => {
+    const { groupId, adminUser } = req.body;
+    const index = groups.findIndex(g => g.id === groupId);
+    if (index !== -1 && groups[index].admins.includes(adminUser)) {
+        groups.splice(index, 1);
+        res.status(200).json({ status: 'ok' });
+        if (db) db.collection('groups').doc(groupId).delete().catch(() => {});
     } else res.status(403).send('Erro');
 });
 
@@ -349,7 +407,7 @@ app.get('/admin', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.30</h1><p>Update System: Ativo ✅</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.31</h1><p>Update System: Ativo ✅ | Group Recovery: OK ✅</p>`);
 });
 
 app.listen(port, () => console.log(`Noctis v20.30 pronto.`));
