@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.36 (RECOVERY MASTER)
- * ESTABILIZAÇÃO TOTAL: Recuperação de Firebase, Fotos e Triple Check.
+ * NOCTIS MESSENGER - SERVER V20.37 (DIRECT UPLOAD)
+ * ESTABILIZAÇÃO TOTAL: Upload Direto de APK, Sincronia de Grupo e Recovery.
  */
 
 const express = require('express');
@@ -8,6 +8,8 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const B2 = require('backblaze-b2');
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage() });
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -29,7 +31,6 @@ let latestApkName = "";
 const rawConfig = process.env.FIREBASE_CONFIG;
 if (rawConfig) {
     try {
-        // Remove caracteres de controle REAIS que quebram o JSON.
         let sanitized = rawConfig.trim()
             .replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
 
@@ -43,7 +44,6 @@ if (rawConfig) {
         }
         firebaseStatus = "Conectado! 🔥";
     } catch (err) {
-        // Se falhar, tenta forçar o escape de quebras de linha reais
         try {
             const forced = rawConfig.replace(/\n/g, "\\n");
             const serviceAccount = JSON.parse(forced);
@@ -110,7 +110,7 @@ function notifyGroupChange(groupId, adminSender) {
 }
 
 // --- MIDIA ---
-async function uploadToB2(base64Data, fileName) {
+async function uploadToB2(bufferData, fileName) {
     if (!B2_BUCKET_ID) return null;
     try {
         await b2.authorize();
@@ -119,7 +119,7 @@ async function uploadToB2(base64Data, fileName) {
             uploadUrl: uploadUrlResp.data.uploadUrl,
             uploadAuthToken: uploadUrlResp.data.authorizationToken,
             fileName: fileName,
-            data: Buffer.from(base64Data, 'base64')
+            data: bufferData
         });
         return `B2_URL:${uploadResp.data.fileName}`;
     } catch (e) { return null; }
@@ -128,7 +128,26 @@ async function uploadToB2(base64Data, fileName) {
 app.use(cors());
 app.use(bodyParser.json({ limit: '100mb' }));
 
-// --- ADMIN / ATUALIZAÇÃO ---
+// --- ADMIN / UPLOAD DIRETO ---
+
+app.post('/admin/upload_apk', upload.single('apkFile'), async (req, res) => {
+    const { versionCode, password } = req.body;
+    if (password !== "pedropvh133@gmail.com/admin") return res.status(403).send('Senha Incorreta');
+    if (!req.file) return res.status(400).send('Arquivo não enviado');
+
+    const fileName = `update_v${versionCode}_${Date.now()}.apk`;
+    const b2Url = await uploadToB2(req.file.buffer, fileName);
+
+    if (b2Url) {
+        latestVersionCode = parseInt(versionCode);
+        latestApkName = fileName;
+
+        if (db) db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName });
+        res.json({ status: 'ok', versionCode: latestVersionCode, apkName: latestApkName });
+    } else {
+        res.status(500).send('Erro no B2 Cloud');
+    }
+});
 
 app.post('/admin/update_version', async (req, res) => {
     const { versionCode, apkName, password } = req.body;
@@ -165,7 +184,7 @@ app.post('/login', (req, res) => {
 
 app.post('/user/update_pic', async (req, res) => {
     const { username, profilePic } = req.body;
-    const b2Url = await uploadToB2(profilePic, `profile_${username}_${Date.now()}`);
+    const b2Url = await uploadToB2(Buffer.from(profilePic, 'base64'), `profile_${username}_${Date.now()}`);
     if (b2Url) {
         let user = users.find(u => u.username === username);
         if (user) {
@@ -273,7 +292,7 @@ app.post('/group/update_pic', async (req, res) => {
     const { groupId, adminUser, profilePic } = req.body;
     const group = groups.find(g => g.id === groupId);
     if (group && group.admins.includes(adminUser)) {
-        const b2Url = await uploadToB2(profilePic, `group_${groupId}_${Date.now()}`);
+        const b2Url = await uploadToB2(Buffer.from(profilePic, 'base64'), `group_${groupId}_${Date.now()}`);
         if (b2Url) {
             group.profilePic = b2Url;
             res.status(200).json(group);
@@ -310,7 +329,7 @@ app.post('/send_message', async (req, res) => {
 
     let finalContent = content;
     if (isAudio || isImage || isVideo) {
-        const b2Url = await uploadToB2(content, `media_${Date.now()}_${username}`);
+        const b2Url = await uploadToB2(Buffer.from(content, 'base64'), `media_${Date.now()}_${username}`);
         if (b2Url) finalContent = b2Url;
     }
     const msgData = { id: Date.now(), from: username, to: recipient, content: finalContent, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false, delivered: false };
@@ -469,53 +488,107 @@ app.get('/user/info/:username', (req, res) => {
 
 app.get('/admin', (req, res) => {
     res.send(`
-        <body style="background: #0A0E14; color: white; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
-            <div style="background: rgba(30, 41, 59, 0.7); padding: 40px; border-radius: 20px; border: 1px solid #00D2FF; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); backdrop-filter: blur(10px); width: 400px; text-align: center;">
+        <body style="background: #0A0E14; color: white; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px;">
+            <div style="background: rgba(30, 41, 59, 0.7); padding: 40px; border-radius: 20px; border: 1px solid #00D2FF; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); backdrop-filter: blur(10px); width: 100%; max-width: 450px; text-align: center;">
                 <h1 style="color: #00D2FF; margin-bottom: 30px; letter-spacing: 2px;">🛰️ MASTER CONTROL</h1>
+
                 <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 10px; margin-bottom: 25px; text-align: left; font-size: 14px;">
                     <p style="margin: 5px 0;">🔥 Firebase: <span style="color: #00F260">${firebaseStatus}</span></p>
                     <p style="margin: 5px 0;">☁️ B2 Cloud: <span style="color: #00F260">${b2Status}</span></p>
                     <p style="margin: 5px 0;">📱 Versão Atual: <span style="color: #FF00FF">${latestVersionCode}</span></p>
+                    <p style="margin: 5px 0; font-size: 10px; color: #94A3B8;">APK: ${latestApkName}</p>
                 </div>
-                <div style="display: flex; flex-direction: column; gap: 15px;">
-                    <input id="vCode" type="number" placeholder="Código da Versão" style="background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none;">
-                    <input id="apkName" type="text" placeholder="Nome do APK" style="background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none;">
-                    <input id="pass" type="password" placeholder="Senha Master" style="background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none;">
-                    <button onclick="launchUpdate()" style="background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; border: none; padding: 15px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 10px;">🚀 LANÇAR ATUALIZAÇÃO</button>
+
+                <form id="uploadForm" style="display: flex; flex-direction: column; gap: 15px;">
+                    <div style="text-align: left;">
+                        <label style="font-size: 12px; color: #00D2FF; margin-bottom: 5px; display: block;">NOVA VERSÃO (Número):</label>
+                        <input name="versionCode" type="number" placeholder="Ex: 3" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
+                    </div>
+
+                    <div style="text-align: left;">
+                        <label style="font-size: 12px; color: #00D2FF; margin-bottom: 5px; display: block;">ARQUIVO APK:</label>
+                        <input name="apkFile" type="file" accept=".apk" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 10px; border-radius: 8px; outline: none; box-sizing: border-box; font-size: 12px;">
+                    </div>
+
+                    <div style="text-align: left;">
+                        <label style="font-size: 12px; color: #00D2FF; margin-bottom: 5px; display: block;">SENHA MASTER:</label>
+                        <input name="password" type="password" placeholder="Sua senha secreta" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
+                    </div>
+
+                    <button type="submit" style="background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; border: none; padding: 15px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 10px; text-transform: uppercase;">
+                        🚀 SUBIR E LANÇAR ATUALIZAÇÃO
+                    </button>
+                </form>
+
+                <div id="progressBox" style="display: none; margin-top: 20px;">
+                    <div style="width: 100%; background: #1E293B; height: 10px; border-radius: 5px; overflow: hidden;">
+                        <div id="progressBar" style="width: 0%; height: 100%; background: #00F260; transition: 0.3s;"></div>
+                    </div>
+                    <p id="percent" style="font-size: 10px; color: #00F260; margin-top: 5px;">0%</p>
                 </div>
+
                 <p id="msg" style="margin-top: 20px; font-size: 12px; color: #94A3B8;"></p>
             </div>
+
             <script>
-                async function launchUpdate() {
-                    const v = document.getElementById('vCode').value;
-                    const n = document.getElementById('apkName').value;
-                    const p = document.getElementById('pass').value;
-                    const msg = document.getElementById('msg');
-                    if(!v || !n || !p) { msg.innerText = "⚠️ Preencha todos os campos"; return; }
-                    msg.innerText = "📡 Enviando sinal...";
-                    try {
-                        const r = await fetch('/admin/update_version', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ versionCode: v, apkName: n, password: p })
-                        });
-                        if(r.ok) {
+                const form = document.getElementById('uploadForm');
+                const msg = document.getElementById('msg');
+                const progressBox = document.getElementById('progressBox');
+                const progressBar = document.getElementById('progressBar');
+                const percentText = document.getElementById('percent');
+
+                form.onsubmit = async (e) => {
+                    e.preventDefault();
+                    const formData = new FormData(form);
+
+                    if(!formData.get('versionCode') || !formData.get('apkFile').name || !formData.get('password')) {
+                        msg.style.color = "#FF4B2B";
+                        msg.innerText = "⚠️ Preencha todos os campos e selecione o arquivo.";
+                        return;
+                    }
+
+                    msg.style.color = "#94A3B8";
+                    msg.innerText = "📡 Iniciando transferência para a nuvem...";
+                    progressBox.style.display = "block";
+
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('POST', '/admin/upload_apk', true);
+
+                    xhr.upload.onprogress = (event) => {
+                        if (event.lengthComputable) {
+                            const percent = Math.round((event.loaded / event.total) * 100);
+                            progressBar.style.width = percent + "%";
+                            percentText.innerText = percent + "%";
+                            if(percent === 100) msg.innerText = "☁️ Processando na nuvem B2... Aguarde.";
+                        }
+                    };
+
+                    xhr.onload = () => {
+                        if (xhr.status === 200) {
                             msg.style.color = "#00F260";
-                            msg.innerText = "✅ SUCESSO!";
-                            setTimeout(() => location.reload(), 2000);
+                            msg.innerText = "✅ SUCESSO! APK subido e usuários notificados.";
+                            setTimeout(() => location.reload(), 3000);
                         } else {
                             msg.style.color = "#FF4B2B";
-                            msg.innerText = "❌ ERRO: Senha incorreta.";
+                            msg.innerText = "❌ ERRO: " + xhr.responseText;
+                            progressBox.style.display = "none";
                         }
-                    } catch(e) { msg.innerText = "🚫 Falha."; }
-                }
+                    };
+
+                    xhr.onerror = () => {
+                        msg.style.color = "#FF4B2B";
+                        msg.innerText = "🚫 Falha na conexão com o servidor.";
+                    };
+
+                    xhr.send(formData);
+                };
             </script>
         </body>
     `);
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.36</h1><p>Recovery System: Ativo ✅ | Data Integrity: OK ✅</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.37</h1><p>Direct Upload System: Ativo ✅ | Stability Master: OK ✅</p>`);
 });
 
-app.listen(port, () => console.log(`Noctis v20.35 pronto.`));
+app.listen(port, () => console.log(`Noctis v20.37 pronto.`));
