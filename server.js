@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.38 (RAM OPTIMIZATION)
- * ESTABILIZAÇÃO TOTAL: Upload via Disco, Correção de Sinais e Triple Check.
+ * NOCTIS MESSENGER - SERVER V20.40 (CONNECTION BLINDAGE)
+ * ESTABILIZAÇÃO TOTAL: Rota de Status, Estabilidade de Upload e Triple Check.
  */
 
 const express = require('express');
@@ -112,10 +112,19 @@ function notifyGroupChange(groupId, adminSender) {
 }
 
 // --- MIDIA ---
+let b2AuthCache = null;
+let b2AuthTime = 0;
+
 async function uploadToB2(bufferData, fileName) {
     if (!B2_BUCKET_ID) return null;
     try {
-        await b2.authorize();
+        // Cache de autorização por 12 horas
+        if (!b2AuthCache || (Date.now() - b2AuthTime > 12 * 60 * 60 * 1000)) {
+            await b2.authorize();
+            b2AuthCache = true;
+            b2AuthTime = Date.now();
+        }
+
         const uploadUrlResp = await b2.getUploadUrl({ bucketId: B2_BUCKET_ID });
         const uploadResp = await b2.uploadFile({
             uploadUrl: uploadUrlResp.data.uploadUrl,
@@ -124,7 +133,11 @@ async function uploadToB2(bufferData, fileName) {
             data: bufferData
         });
         return `B2_URL:${uploadResp.data.fileName}`;
-    } catch (e) { return null; }
+    } catch (e) {
+        console.error("Erro B2:", e.message);
+        b2AuthCache = null; // Limpa cache em caso de erro
+        return null;
+    }
 }
 
 app.use(cors());
@@ -565,6 +578,7 @@ app.get('/admin', (req, res) => {
 
                     const xhr = new XMLHttpRequest();
                     xhr.open('POST', '/admin/upload_apk', true);
+                    xhr.timeout = 0; // Sem limite de tempo para o upload ✅
 
                     xhr.upload.onprogress = (event) => {
                         if (event.lengthComputable) {
@@ -600,7 +614,7 @@ app.get('/admin', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.38</h1><p>RAM Optimized Upload: Ativo ✅ | Data Integrity: OK ✅</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.40</h1><p>Status: ONLINE ✅ | System: BLINDADO 🛡️</p>`);
 });
 
 app.listen(port, () => console.log(`Noctis v20.37 pronto.`));
