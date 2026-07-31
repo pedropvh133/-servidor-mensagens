@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.34 (STABILITY FIX)
- * ESTABILIZAÇÃO TOTAL: Correção de Cabeçalho, Limpeza de JSON e Triple Check.
+ * NOCTIS MESSENGER - SERVER V20.35 (GROUP SYNC)
+ * ESTABILIZAÇÃO TOTAL: Sincronia Instantânea de Grupos, Status e Master Control.
  */
 
 const express = require('express');
@@ -29,7 +29,6 @@ let latestApkName = "";
 const rawConfig = process.env.FIREBASE_CONFIG;
 if (rawConfig) {
     try {
-        // Remove caracteres de controle, quebras de linha e espaços extras
         let sanitized = rawConfig.trim()
             .replace(/[\u0000-\u001F\u007F-\u009F]/g, "")
             .replace(/\\n/g, "\n");
@@ -85,6 +84,20 @@ async function loadDataFromBackup() {
     } catch (e) { console.error('Erro Backup'); }
 }
 loadDataFromBackup();
+
+// --- BROADCAST DE MUDANÇA NO GRUPO ---
+function notifyGroupChange(groupId, adminSender) {
+    const group = groups.find(g => g.id === groupId);
+    if (!group) return;
+    group.members.forEach(member => {
+        if (!callSignals[member]) callSignals[member] = [];
+        callSignals[member].push({
+            from: adminSender,
+            data: Buffer.from(`GROUP_STATE_CHANGED:${groupId}`).toString('base64'),
+            time: Date.now()
+        });
+    });
+}
 
 // --- MIDIA ---
 async function uploadToB2(base64Data, fileName) {
@@ -202,6 +215,7 @@ app.post(['/group/update_name', '/group/update_settings'], (req, res) => {
         if (description !== undefined) group.description = description;
         if (rules !== undefined) group.rules = rules;
         res.status(200).json(group);
+        notifyGroupChange(groupId, adminUser);
         if (db) db.collection('groups').doc(groupId).update({ name: group.name, description: group.description, rules: group.rules }).catch(() => {});
     } else res.status(403).send('Erro');
 });
@@ -211,9 +225,8 @@ app.post('/group/add_member', (req, res) => {
     const group = groups.find(g => g.id === groupId);
     if (group && group.admins.includes(adminUser)) {
         if (!group.members.includes(newMember)) group.members.push(newMember);
-        if (!callSignals[newMember]) callSignals[newMember] = [];
-        callSignals[newMember].push({ from: adminUser, data: Buffer.from(`ADDED_TO_GROUP:${group.name}`).toString('base64'), time: Date.now() });
         res.status(200).json(group);
+        notifyGroupChange(groupId, adminUser);
         if (db) db.collection('groups').doc(groupId).update({ members: group.members });
     } else res.status(403).send('Erro');
 });
@@ -225,6 +238,12 @@ app.post('/group/remove_member', (req, res) => {
         group.members = group.members.filter(m => m !== targetUser);
         group.admins = group.admins.filter(a => a !== targetUser);
         res.status(200).json(group);
+        notifyGroupChange(groupId, adminUser);
+
+        // Sinal especial para o removido
+        if (!callSignals[targetUser]) callSignals[targetUser] = [];
+        callSignals[targetUser].push({ from: adminUser, data: Buffer.from(`REMOVED_FROM_GROUP:${groupId}`).toString('base64'), time: Date.now() });
+
         if (db) db.collection('groups').doc(groupId).update({ members: group.members, admins: group.admins }).catch(() => {});
     } else res.status(403).send('Erro');
 });
@@ -234,9 +253,8 @@ app.post('/group/promote', (req, res) => {
     const group = groups.find(g => g.id === groupId);
     if (group && group.admins.includes(adminUser)) {
         if (!group.admins.includes(targetUser)) group.admins.push(targetUser);
-        if (!callSignals[targetUser]) callSignals[targetUser] = [];
-        callSignals[targetUser].push({ from: adminUser, data: Buffer.from(`PROMOTED_TO_ADMIN:${groupId}`).toString('base64'), time: Date.now() });
         res.status(200).json(group);
+        notifyGroupChange(groupId, adminUser);
         if (db) db.collection('groups').doc(groupId).update({ admins: group.admins }).catch(() => {});
     } else res.status(403).send('Erro');
 });
@@ -249,6 +267,7 @@ app.post('/group/update_pic', async (req, res) => {
         if (b2Url) {
             group.profilePic = b2Url;
             res.status(200).json(group);
+            notifyGroupChange(groupId, adminUser);
             if (db) db.collection('groups').doc(groupId).update({ profilePic: b2Url }).catch(() => {});
         } else res.status(500).send('B2 Error');
     } else res.status(403).send('Erro');
@@ -258,8 +277,16 @@ app.post('/group/delete', (req, res) => {
     const { groupId, adminUser } = req.body;
     const index = groups.findIndex(g => g.id === groupId);
     if (index !== -1 && groups[index].admins.includes(adminUser)) {
+        const groupMembers = [...groups[index].members];
         groups.splice(index, 1);
         res.status(200).json({ status: 'ok' });
+
+        // Avisa todos que o grupo morreu
+        groupMembers.forEach(member => {
+            if (!callSignals[member]) callSignals[member] = [];
+            callSignals[member].push({ from: adminUser, data: Buffer.from(`GROUP_DELETED:${groupId}`).toString('base64'), time: Date.now() });
+        });
+
         if (db) db.collection('groups').doc(groupId).delete().catch(() => {});
     } else res.status(403).send('Erro');
 });
@@ -478,7 +505,7 @@ app.get('/admin', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.34</h1><p>Stability Master: Ativo ✅</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.35</h1><p>Group Sync System: Ativo ✅</p>`);
 });
 
-app.listen(port, () => console.log(`Noctis v20.34 pronto.`));
+app.listen(port, () => console.log(`Noctis v20.35 pronto.`));
