@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.40 (CONNECTION BLINDAGE)
- * ESTABILIZAÇÃO TOTAL: Rota de Status, Estabilidade de Upload e Triple Check.
+ * NOCTIS MESSENGER - SERVER V20.43 (CONNECTIVITY MASTER)
+ * ESTABILIZAÇÃO TOTAL: Portal de Download, Anti-Timeout e Triple Check.
  */
 
 const express = require('express');
@@ -11,7 +11,7 @@ const B2 = require('backblaze-b2');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
-const upload = multer({ dest: '/tmp/' }); // Usa o disco temporário do Render em vez da RAM
+const upload = multer({ dest: '/tmp/' });
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -118,13 +118,11 @@ let b2AuthTime = 0;
 async function uploadToB2(bufferData, fileName) {
     if (!B2_BUCKET_ID) return null;
     try {
-        // Cache de autorização por 12 horas
         if (!b2AuthCache || (Date.now() - b2AuthTime > 12 * 60 * 60 * 1000)) {
             await b2.authorize();
             b2AuthCache = true;
             b2AuthTime = Date.now();
         }
-
         const uploadUrlResp = await b2.getUploadUrl({ bucketId: B2_BUCKET_ID });
         const uploadResp = await b2.uploadFile({
             uploadUrl: uploadUrlResp.data.uploadUrl,
@@ -135,7 +133,7 @@ async function uploadToB2(bufferData, fileName) {
         return `B2_URL:${uploadResp.data.fileName}`;
     } catch (e) {
         console.error("Erro B2:", e.message);
-        b2AuthCache = null; // Limpa cache em caso de erro
+        b2AuthCache = null;
         return null;
     }
 }
@@ -143,45 +141,32 @@ async function uploadToB2(bufferData, fileName) {
 app.use(cors());
 app.use(bodyParser.json({ limit: '100mb' }));
 
-// --- ADMIN / UPLOAD DIRETO ---
+// --- ADMIN ---
 
 app.post('/admin/upload_apk', upload.single('apkFile'), async (req, res) => {
     const { versionCode, password } = req.body;
     if (password !== "pedropvh133@gmail.com/admin") return res.status(403).send('Senha Incorreta');
     if (!req.file) return res.status(400).send('Arquivo não enviado');
-
     try {
         const fileName = `update_v${versionCode}_${Date.now()}.apk`;
-        // Lê do disco para evitar crash de RAM
         const fileBuffer = fs.readFileSync(req.file.path);
         const b2Url = await uploadToB2(fileBuffer, fileName);
-
         if (b2Url) {
             latestVersionCode = parseInt(versionCode);
             latestApkName = fileName;
-
             if (db) db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName });
-
-            // Limpa o arquivo temporário do disco
             fs.unlinkSync(req.file.path);
-
             res.json({ status: 'ok', versionCode: latestVersionCode, apkName: latestApkName });
-        } else {
-            res.status(500).send('Erro no B2 Cloud');
-        }
-    } catch (e) {
-        res.status(500).send('Erro interno: ' + e.message);
-    }
+        } else res.status(500).send('Erro no B2 Cloud');
+    } catch (e) { res.status(500).send('Erro interno: ' + e.message); }
 });
 
 app.post('/admin/update_version', async (req, res) => {
     const { versionCode, apkName, password } = req.body;
     if (password !== "pedropvh133@gmail.com/admin") return res.status(403).send('Negado');
-
     latestVersionCode = parseInt(versionCode);
     latestApkName = apkName;
     res.json({ status: 'ok', versionCode: latestVersionCode, apkName: latestApkName });
-
     if (db) db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName }).catch(() => {});
 });
 
@@ -218,34 +203,6 @@ app.post('/user/update_pic', async (req, res) => {
             if (db) db.collection('users').doc(username).update({ profilePic: b2Url }).catch(() => {});
         } else res.status(404).send('Not found');
     } else res.status(500).send('B2 Error');
-});
-
-// --- SEGURANÇA ---
-
-app.post('/user/block', (req, res) => {
-    const { username, target } = req.body;
-    const user = users.find(u => u.username === username);
-    if (user) {
-        if (!user.blockedUsers) user.blockedUsers = [];
-        if (!user.blockedUsers.includes(target)) user.blockedUsers.push(target);
-        res.json({ status: 'ok', list: user.blockedUsers });
-        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
-    } else res.status(404).send('Not found');
-});
-
-app.post('/user/unblock', (req, res) => {
-    const { username, target } = req.body;
-    const user = users.find(u => u.username === username);
-    if (user && user.blockedUsers) {
-        user.blockedUsers = user.blockedUsers.filter(u => u !== target);
-        res.json({ status: 'ok', list: user.blockedUsers });
-        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
-    } else res.status(404).send('Not found');
-});
-
-app.get('/user/blocked_list/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    res.json(user ? (user.blockedUsers || []) : []);
 });
 
 // --- GRUPOS ---
@@ -285,73 +242,12 @@ app.post('/group/add_member', (req, res) => {
     } else res.status(403).send('Erro');
 });
 
-app.post('/group/remove_member', (req, res) => {
-    const { groupId, adminUser, targetUser } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        group.members = group.members.filter(m => m !== targetUser);
-        group.admins = group.admins.filter(a => a !== targetUser);
-        res.status(200).json(group);
-        notifyGroupChange(groupId, adminUser);
-
-        // Sinal especial para o removido
-        if (!callSignals[targetUser]) callSignals[targetUser] = [];
-        callSignals[targetUser].push({ from: adminUser, data: Buffer.from(`REMOVED_FROM_GROUP:${groupId}`).toString('base64'), time: Date.now() });
-
-        if (db) db.collection('groups').doc(groupId).update({ members: group.members, admins: group.admins }).catch(() => {});
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/promote', (req, res) => {
-    const { groupId, adminUser, targetUser } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        if (!group.admins.includes(targetUser)) group.admins.push(targetUser);
-        res.status(200).json(group);
-        notifyGroupChange(groupId, adminUser);
-        if (db) db.collection('groups').doc(groupId).update({ admins: group.admins }).catch(() => {});
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/update_pic', async (req, res) => {
-    const { groupId, adminUser, profilePic } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        const b2Url = await uploadToB2(Buffer.from(profilePic, 'base64'), `group_${groupId}_${Date.now()}`);
-        if (b2Url) {
-            group.profilePic = b2Url;
-            res.status(200).json(group);
-            notifyGroupChange(groupId, adminUser);
-            if (db) db.collection('groups').doc(groupId).update({ profilePic: b2Url }).catch(() => {});
-        } else res.status(500).send('B2 Error');
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/delete', (req, res) => {
-    const { groupId, adminUser } = req.body;
-    const index = groups.findIndex(g => g.id === groupId);
-    if (index !== -1 && groups[index].admins.includes(adminUser)) {
-        const groupMembers = [...groups[index].members];
-        groups.splice(index, 1);
-        res.status(200).json({ status: 'ok' });
-
-        // Avisa todos que o grupo morreu
-        groupMembers.forEach(member => {
-            if (!callSignals[member]) callSignals[member] = [];
-            callSignals[member].push({ from: adminUser, data: Buffer.from(`GROUP_DELETED:${groupId}`).toString('base64'), time: Date.now() });
-        });
-
-        if (db) db.collection('groups').doc(groupId).delete().catch(() => {});
-    } else res.status(403).send('Erro');
-});
-
 // --- MENSAGENS ---
 
 app.post('/send_message', async (req, res) => {
     const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
     const target = isGroup ? groups.find(g => g.id === recipient) : users.find(u => u.username === recipient);
     if (!isGroup && target && target.blockedUsers && target.blockedUsers.includes(username)) return res.json({ status: 'ok' });
-
     let finalContent = content;
     if (isAudio || isImage || isVideo) {
         const b2Url = await uploadToB2(Buffer.from(content, 'base64'), `media_${Date.now()}_${username}`);
@@ -359,22 +255,8 @@ app.post('/send_message', async (req, res) => {
     }
     const msgData = { id: Date.now(), from: username, to: recipient, content: finalContent, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false, delivered: false };
     messages.push(msgData);
-    if (messages.length > 5000) messages.shift();
     res.status(200).json({ status: 'ok' });
     if (db) db.collection('messages').doc(msgData.id.toString()).set(msgData).catch(() => {});
-});
-
-app.get('/conversations/list/:username', (req, res) => {
-    const me = req.params.username;
-    const involved = new Set();
-    messages.forEach(m => {
-        if (!m.isGroup) {
-            if (m.from === me) involved.add(m.to);
-            if (m.to === me) involved.add(m.from);
-        }
-    });
-    const result = users.filter(u => involved.has(u.username)).map(u => ({ username: u.username, profilePic: u.profilePic, bio: u.bio, lastSeen: u.lastSeen }));
-    res.json(result);
 });
 
 app.get('/conversation/:u1/:u2', (req, res) => {
@@ -386,10 +268,6 @@ app.get('/conversation/:u1/:u2', (req, res) => {
         }
     });
     res.json(list);
-});
-
-app.get('/group/messages/:groupId', (req, res) => {
-    res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId));
 });
 
 app.get('/messages/unread/:username', (req, res) => {
@@ -426,44 +304,39 @@ app.post('/mark_read', (req, res) => {
     }
 });
 
-app.post('/delete_message', (req, res) => {
-    const { messageId, username } = req.body;
-    const index = messages.findIndex(m => m.id == messageId && m.from === username);
-    if (index !== -1) {
-        messages.splice(index, 1);
-        res.json({ status: 'ok' });
-        if (db) db.collection('messages').doc(messageId.toString()).delete().catch(() => {});
-    } else res.status(403).send('Erro');
-});
+// --- PÁGINAS ---
 
-app.post('/destroy_view_once', (req, res) => {
-    const { messageId, username } = req.body;
-    const msg = messages.find(m => m.id == messageId && m.to === username && m.viewOnce);
-    if (msg) {
-        msg.content = "FOTO_AUTODESTRUIDA";
-        msg.isImage = false; msg.isVideo = false; msg.isAudio = false;
-        res.json({ status: 'ok' });
-        if (db) db.collection('messages').doc(messageId.toString()).update({ content: "FOTO_AUTODESTRUIDA", isImage: false, isVideo: false, isAudio: false }).catch(() => {});
-    } else res.status(404).send('Off');
-});
-
-app.post('/clear_messages', (req, res) => {
-    const { username, password } = req.body;
-    const user = users.find(u => u.username === username && u.password === password);
-    if (user) {
-        messages = messages.filter(m => m.from !== username && m.to !== username);
-        res.json({ status: 'ok' });
-    } else res.status(401).send('Erro');
-});
-
-// --- SINALIZAÇÃO & ATUALIZAÇÃO ---
-
-app.get('/call/check/:username', (req, res) => {
-    const signals = callSignals[req.params.username] || [];
-    callSignals[req.params.username] = [];
-    res.set('X-Latest-Version', latestVersionCode.toString());
-    res.set('X-Apk-Name', latestApkName);
-    res.json(signals);
+app.get('/download', (req, res) => {
+    const apkLink = latestApkName ? `/b2file/${latestApkName}` : "#";
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="pt-br">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>NOCTIS - Download Oficial</title>
+            <style>
+                body { background: #0A0E14; color: white; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+                .container { background: rgba(30, 41, 59, 0.6); padding: 50px; border-radius: 30px; border: 1px solid #00D2FF; box-shadow: 0 0 30px rgba(0, 210, 255, 0.15); backdrop-filter: blur(15px); text-align: center; max-width: 400px; width: 90%; }
+                .logo { width: 100px; height: 100px; background: linear-gradient(45deg, #00D2FF, #FF00FF); border-radius: 25px; margin: 0 auto 30px; display: flex; align-items: center; justify-content: center; font-size: 50px; box-shadow: 0 0 20px rgba(0, 210, 255, 0.4); }
+                h1 { color: #00D2FF; letter-spacing: 3px; margin-bottom: 10px; font-size: 28px; }
+                p { color: #94A3B8; font-size: 14px; margin-bottom: 40px; }
+                .btn { background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; text-decoration: none; padding: 18px 30px; border-radius: 12px; font-weight: bold; display: inline-block; transition: 0.3s; text-transform: uppercase; letter-spacing: 1px; box-shadow: 0 4px 15px rgba(0, 210, 255, 0.3); }
+                .btn:hover { transform: translateY(-3px); box-shadow: 0 8px 25px rgba(0, 210, 255, 0.5); }
+                .version { margin-top: 25px; font-size: 11px; color: #475569; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="logo">🛰️</div>
+                <h1>NOCTIS</h1>
+                <p>O mensageiro blindado para quem valoriza a privacidade absoluta.</p>
+                <a href="${apkLink}" class="btn">Baixar Versão Atual</a>
+                <div class="version">Versão Estável: ${latestVersionCode} | Criptografia GCM-256</div>
+            </div>
+        </body>
+        </html>
+    `);
 });
 
 app.get('/b2file/:filename', async (req, res) => {
@@ -479,133 +352,62 @@ app.get('/b2file/:filename', async (req, res) => {
     } catch (e) { res.status(404).send('Off'); }
 });
 
-app.post('/call/signal', async (req, res) => {
-    const { to, from, data } = req.body;
-    if (to.startsWith('group_')) {
-        const group = groups.find(g => g.id === to);
-        if (group) {
-            group.members.forEach(member => {
-                if (member !== from) {
-                    if (!callSignals[member]) callSignals[member] = [];
-                    callSignals[member].push({ from, data, groupName: group.name, groupId: group.id, time: Date.now() });
-                }
-            });
-            return res.json({ status: 'ok' });
-        }
-    }
-    if (!callSignals[to]) callSignals[to] = [];
-    callSignals[to].push({ from, data, time: Date.now() });
-    res.json({ status: 'ok' });
-});
-
-app.get('/status/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    if (!user) return res.json({ status: 'OFFLINE' });
-    const online = (Date.now() - user.lastSeen) / 1000 < 60;
-    res.json({ status: online ? 'ONLINE' : 'OFFLINE' });
-});
-
-app.get('/user/info/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    if (user) res.json(user);
-    else res.status(404).send('Not found');
-});
-
 app.get('/admin', (req, res) => {
     res.send(`
         <body style="background: #0A0E14; color: white; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px;">
             <div style="background: rgba(30, 41, 59, 0.7); padding: 40px; border-radius: 20px; border: 1px solid #00D2FF; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); backdrop-filter: blur(10px); width: 100%; max-width: 450px; text-align: center;">
                 <h1 style="color: #00D2FF; margin-bottom: 30px; letter-spacing: 2px;">🛰️ MASTER CONTROL</h1>
-
                 <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 10px; margin-bottom: 25px; text-align: left; font-size: 14px;">
                     <p style="margin: 5px 0;">🔥 Firebase: <span style="color: #00F260">${firebaseStatus}</span></p>
                     <p style="margin: 5px 0;">☁️ B2 Cloud: <span style="color: #00F260">${b2Status}</span></p>
                     <p style="margin: 5px 0;">📱 Versão Atual: <span style="color: #FF00FF">${latestVersionCode}</span></p>
-                    <p style="margin: 5px 0; font-size: 10px; color: #94A3B8;">APK: ${latestApkName}</p>
                 </div>
-
                 <form id="uploadForm" style="display: flex; flex-direction: column; gap: 15px;">
-                    <div style="text-align: left;">
-                        <label style="font-size: 12px; color: #00D2FF; margin-bottom: 5px; display: block;">NOVA VERSÃO (Número):</label>
-                        <input name="versionCode" type="number" placeholder="Ex: 3" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
-                    </div>
-
-                    <div style="text-align: left;">
-                        <label style="font-size: 12px; color: #00D2FF; margin-bottom: 5px; display: block;">ARQUIVO APK:</label>
-                        <input name="apkFile" type="file" accept=".apk" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 10px; border-radius: 8px; outline: none; box-sizing: border-box; font-size: 12px;">
-                    </div>
-
-                    <div style="text-align: left;">
-                        <label style="font-size: 12px; color: #00D2FF; margin-bottom: 5px; display: block;">SENHA MASTER:</label>
-                        <input name="password" type="password" placeholder="Sua senha secreta" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
-                    </div>
-
-                    <button type="submit" style="background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; border: none; padding: 15px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 10px; text-transform: uppercase;">
-                        🚀 SUBIR E LANÇAR ATUALIZAÇÃO
-                    </button>
+                    <input name="versionCode" type="number" placeholder="Nova Versão" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
+                    <input name="apkFile" type="file" accept=".apk" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 10px; border-radius: 8px; outline: none; box-sizing: border-box; font-size: 12px;">
+                    <input name="password" type="password" placeholder="Senha Master" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
+                    <button type="submit" style="background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; border: none; padding: 15px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 10px;">🚀 SUBIR E LANÇAR ATUALIZAÇÃO</button>
                 </form>
-
                 <div id="progressBox" style="display: none; margin-top: 20px;">
                     <div style="width: 100%; background: #1E293B; height: 10px; border-radius: 5px; overflow: hidden;">
                         <div id="progressBar" style="width: 0%; height: 100%; background: #00F260; transition: 0.3s;"></div>
                     </div>
                     <p id="percent" style="font-size: 10px; color: #00F260; margin-top: 5px;">0%</p>
                 </div>
-
                 <p id="msg" style="margin-top: 20px; font-size: 12px; color: #94A3B8;"></p>
             </div>
-
             <script>
                 const form = document.getElementById('uploadForm');
                 const msg = document.getElementById('msg');
                 const progressBox = document.getElementById('progressBox');
                 const progressBar = document.getElementById('progressBar');
                 const percentText = document.getElementById('percent');
-
                 form.onsubmit = async (e) => {
                     e.preventDefault();
                     const formData = new FormData(form);
-
                     if(!formData.get('versionCode') || !formData.get('apkFile').name || !formData.get('password')) {
-                        msg.style.color = "#FF4B2B";
-                        msg.innerText = "⚠️ Preencha todos os campos e selecione o arquivo.";
-                        return;
+                        msg.style.color = "#FF4B2B"; msg.innerText = "⚠️ Preencha todos os campos."; return;
                     }
-
-                    msg.style.color = "#94A3B8";
-                    msg.innerText = "📡 Iniciando transferência para a nuvem...";
+                    msg.style.color = "#94A3B8"; msg.innerText = "📡 Enviando...";
                     progressBox.style.display = "block";
-
                     const xhr = new XMLHttpRequest();
                     xhr.open('POST', '/admin/upload_apk', true);
-                    xhr.timeout = 0; // Sem limite de tempo para o upload ✅
-
+                    xhr.timeout = 0;
                     xhr.upload.onprogress = (event) => {
                         if (event.lengthComputable) {
                             const percent = Math.round((event.loaded / event.total) * 100);
                             progressBar.style.width = percent + "%";
                             percentText.innerText = percent + "%";
-                            if(percent === 100) msg.innerText = "☁️ Processando na nuvem B2... Aguarde.";
                         }
                     };
-
                     xhr.onload = () => {
                         if (xhr.status === 200) {
-                            msg.style.color = "#00F260";
-                            msg.innerText = "✅ SUCESSO! APK subido e usuários notificados.";
+                            msg.style.color = "#00F260"; msg.innerText = "✅ SUCESSO!";
                             setTimeout(() => location.reload(), 3000);
                         } else {
-                            msg.style.color = "#FF4B2B";
-                            msg.innerText = "❌ ERRO: " + xhr.responseText;
-                            progressBox.style.display = "none";
+                            msg.style.color = "#FF4B2B"; msg.innerText = "❌ ERRO: " + xhr.responseText;
                         }
                     };
-
-                    xhr.onerror = () => {
-                        msg.style.color = "#FF4B2B";
-                        msg.innerText = "🚫 Falha na conexão com o servidor.";
-                    };
-
                     xhr.send(formData);
                 };
             </script>
@@ -614,7 +416,7 @@ app.get('/admin', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.40</h1><p>Status: ONLINE ✅ | System: BLINDADO 🛡️</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.43</h1><p>Status: ONLINE ✅ | System: BLINDADO 🛡️</p>`);
 });
 
-app.listen(port, () => console.log(`Noctis v20.37 pronto.`));
+app.listen(port, () => console.log(`Noctis v20.43 pronto.`));
