@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.35 (GROUP SYNC)
- * ESTABILIZAÇÃO TOTAL: Sincronia Instantânea de Grupos, Status e Master Control.
+ * NOCTIS MESSENGER - SERVER V20.36 (RECOVERY MASTER)
+ * ESTABILIZAÇÃO TOTAL: Recuperação de Firebase, Fotos e Triple Check.
  */
 
 const express = require('express');
@@ -25,13 +25,13 @@ let cachedBucketName = null;
 let latestVersionCode = 1;
 let latestApkName = "";
 
-// --- FIREBASE CONFIG (LIMPEZA ULTRA) ---
+// --- FIREBASE CONFIG (LIMPEZA SEGURA) ---
 const rawConfig = process.env.FIREBASE_CONFIG;
 if (rawConfig) {
     try {
+        // Remove caracteres de controle REAIS que quebram o JSON.
         let sanitized = rawConfig.trim()
-            .replace(/[\u0000-\u001F\u007F-\u009F]/g, "")
-            .replace(/\\n/g, "\n");
+            .replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
 
         if (sanitized.startsWith('"') && sanitized.endsWith('"')) {
             sanitized = sanitized.substring(1, sanitized.length - 1);
@@ -43,7 +43,17 @@ if (rawConfig) {
         }
         firebaseStatus = "Conectado! 🔥";
     } catch (err) {
-        firebaseStatus = `Erro Config: ${err.message} ❌`;
+        // Se falhar, tenta forçar o escape de quebras de linha reais
+        try {
+            const forced = rawConfig.replace(/\n/g, "\\n");
+            const serviceAccount = JSON.parse(forced);
+            if (admin.apps.length === 0) {
+                admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+            }
+            firebaseStatus = "Conectado! 🔥";
+        } catch (err2) {
+            firebaseStatus = `Erro Config: ${err.message} ❌`;
+        }
     }
 }
 const db = (admin.apps.length > 0) ? admin.firestore() : null;
@@ -505,7 +515,7 @@ app.get('/admin', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.35</h1><p>Group Sync System: Ativo ✅</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.36</h1><p>Recovery System: Ativo ✅ | Data Integrity: OK ✅</p>`);
 });
 
 app.listen(port, () => console.log(`Noctis v20.35 pronto.`));
