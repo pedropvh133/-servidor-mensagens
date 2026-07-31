@@ -443,7 +443,7 @@ app.post('/call/signal', async (req, res) => {
             group.members.forEach(member => {
                 if (member !== from) {
                     if (!callSignals[member]) callSignals[member] = [];
-                    callSignals[member].push({ from, data, groupName: group.name, time: Date.now() });
+                    callSignals[member].push({ from, data, groupName: group.name, groupId: group.id, time: Date.now() });
                 }
             });
             return res.json({ status: 'ok' });
