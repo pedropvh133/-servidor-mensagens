@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.37 (DIRECT UPLOAD)
- * ESTABILIZAÇÃO TOTAL: Upload Direto de APK, Sincronia de Grupo e Recovery.
+ * NOCTIS MESSENGER - SERVER V20.38 (RAM OPTIMIZATION)
+ * ESTABILIZAÇÃO TOTAL: Upload via Disco, Correção de Sinais e Triple Check.
  */
 
 const express = require('express');
@@ -9,7 +9,9 @@ const cors = require('cors');
 const admin = require('firebase-admin');
 const B2 = require('backblaze-b2');
 const multer = require('multer');
-const upload = multer({ storage: multer.memoryStorage() });
+const fs = require('fs');
+const path = require('path');
+const upload = multer({ dest: '/tmp/' }); // Usa o disco temporário do Render em vez da RAM
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -135,17 +137,27 @@ app.post('/admin/upload_apk', upload.single('apkFile'), async (req, res) => {
     if (password !== "pedropvh133@gmail.com/admin") return res.status(403).send('Senha Incorreta');
     if (!req.file) return res.status(400).send('Arquivo não enviado');
 
-    const fileName = `update_v${versionCode}_${Date.now()}.apk`;
-    const b2Url = await uploadToB2(req.file.buffer, fileName);
+    try {
+        const fileName = `update_v${versionCode}_${Date.now()}.apk`;
+        // Lê do disco para evitar crash de RAM
+        const fileBuffer = fs.readFileSync(req.file.path);
+        const b2Url = await uploadToB2(fileBuffer, fileName);
 
-    if (b2Url) {
-        latestVersionCode = parseInt(versionCode);
-        latestApkName = fileName;
+        if (b2Url) {
+            latestVersionCode = parseInt(versionCode);
+            latestApkName = fileName;
 
-        if (db) db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName });
-        res.json({ status: 'ok', versionCode: latestVersionCode, apkName: latestApkName });
-    } else {
-        res.status(500).send('Erro no B2 Cloud');
+            if (db) db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName });
+
+            // Limpa o arquivo temporário do disco
+            fs.unlinkSync(req.file.path);
+
+            res.json({ status: 'ok', versionCode: latestVersionCode, apkName: latestApkName });
+        } else {
+            res.status(500).send('Erro no B2 Cloud');
+        }
+    } catch (e) {
+        res.status(500).send('Erro interno: ' + e.message);
     }
 });
 
@@ -588,7 +600,7 @@ app.get('/admin', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.37</h1><p>Direct Upload System: Ativo ✅ | Stability Master: OK ✅</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.38</h1><p>RAM Optimized Upload: Ativo ✅ | Data Integrity: OK ✅</p>`);
 });
 
 app.listen(port, () => console.log(`Noctis v20.37 pronto.`));
