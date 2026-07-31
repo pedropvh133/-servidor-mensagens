@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.44 (NETWORK ARMOR)
- * ESTABILIZAÇÃO TOTAL: Blindagem Anti-Timeout, Portal Premium e Triple Check.
+ * NOCTIS MESSENGER - SERVER V20.45 (VAULT STABILIZATION)
+ * ESTABILIZAÇÃO TOTAL: Sincronia de Fotos, Envio Blindado e Anti-Timeout.
  */
 
 const express = require('express');
@@ -416,7 +416,7 @@ app.get('/admin', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.44</h1><p>Status: ONLINE ✅ | Armor: ACTIVE 🛡️</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.45</h1><p>Status: ONLINE ✅ | Vault: SECURE 🔐</p>`);
 });
 
 app.listen(port, () => console.log(`Noctis v20.43 pronto.`));
