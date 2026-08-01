@@ -197,12 +197,84 @@ app.post('/user/update_pic', async (req, res) => {
     const b2Url = await uploadToB2(Buffer.from(profilePic, 'base64'), `profile_${username}_${Date.now()}`);
     if (b2Url) {
         let user = users.find(u => u.username === username);
-        if (user) {
-            user.profilePic = b2Url;
-            res.status(200).json({ status: 'ok' });
-            if (db) db.collection('users').doc(username).update({ profilePic: b2Url }).catch(() => {});
-        } else res.status(404).send('Not found');
     } else res.status(500).send('B2 Error');
+});
+
+app.get('/user/info/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    if (user) {
+        const { password, ...safeUser } = user;
+        // Se a foto for do tipo B2, garante o prefixo se não tiver (mas geralmente já tem no RAM)
+        res.json(safeUser);
+    } else res.status(404).json({ error: 'NÃO_ENCONTRADO' });
+});
+
+app.get('/conversations/list/:username', (req, res) => {
+    // Retorna todos os usuários para simplificar a lista de contatos, ou apenas os que tem conversa
+    const list = users.map(u => {
+        const { password, ...safe } = u;
+        return safe;
+    });
+    res.json(list);
+});
+
+app.get('/status/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    if (user) {
+        const isOnline = (Date.now() - user.lastSeen) < 60000;
+        res.json({ status: isOnline ? "Online" : "Visto por último recentemente" });
+    } else res.json({ status: "Offline" });
+});
+
+app.post('/user/update_settings', (req, res) => {
+    const { username, currentPassword, newUsername, newPassword, privacyLastSeen, privacyProfilePic, privacyCalls, bio } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user && user.password === currentPassword) {
+        if (newUsername) user.username = newUsername;
+        if (newPassword) user.password = newPassword;
+        if (privacyLastSeen) user.privacyLastSeen = privacyLastSeen;
+        if (privacyProfilePic) user.privacyProfilePic = privacyProfilePic;
+        if (privacyCalls) user.privacyCalls = privacyCalls;
+        if (bio) user.bio = bio;
+        res.status(200).json({ status: 'ok', ...user });
+        if (db) db.collection('users').doc(username).set(user).catch(() => {});
+    } else res.status(401).send('Erro');
+});
+
+app.post('/user/delete_account', (req, res) => {
+    const { username, password } = req.body;
+    const idx = users.findIndex(u => u.username === username && u.password === password);
+    if (idx !== -1) {
+        users.splice(idx, 1);
+        res.json({ status: 'ok' });
+        if (db) db.collection('users').doc(username).delete().catch(() => {});
+    } else res.status(401).send('Erro');
+});
+
+app.post('/user/block', (req, res) => {
+    const { username, target } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user) {
+        if (!user.blockedUsers) user.blockedUsers = [];
+        if (!user.blockedUsers.includes(target)) user.blockedUsers.push(target);
+        res.json({ status: 'ok', list: user.blockedUsers });
+        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
+    } else res.status(404).send('Erro');
+});
+
+app.post('/user/unblock', (req, res) => {
+    const { username, target } = req.body;
+    const user = users.find(u => u.username === username);
+    if (user && user.blockedUsers) {
+        user.blockedUsers = user.blockedUsers.filter(b => b !== target);
+        res.json({ status: 'ok', list: user.blockedUsers });
+        if (db) db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
+    } else res.status(404).send('Erro');
+});
+
+app.get('/user/blocked_list/:username', (req, res) => {
+    const user = users.find(u => u.username === req.params.username);
+    res.json(user?.blockedUsers || []);
 });
 
 // --- GRUPOS ---
@@ -240,6 +312,10 @@ app.post('/group/add_member', (req, res) => {
         notifyGroupChange(groupId, adminUser);
         if (db) db.collection('groups').doc(groupId).update({ members: group.members });
     } else res.status(403).send('Erro');
+});
+
+app.get('/group/messages/:groupId', (req, res) => {
+    res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId));
 });
 
 // --- MENSAGENS ---
@@ -302,6 +378,20 @@ app.post('/mark_read', (req, res) => {
             db.collection('messages').doc(m.id.toString()).update({ read: true }).catch(() => {});
         });
     }
+});
+
+app.post('/call/signal', (req, res) => {
+    const { to, from, data } = req.body;
+    if (!callSignals[to]) callSignals[to] = [];
+    callSignals[to].push({ from, data, time: Date.now() });
+    res.json({ status: 'ok' });
+});
+
+app.get('/call/check/:username', (req, res) => {
+    const u = req.params.username;
+    const signals = callSignals[u] || [];
+    callSignals[u] = []; // Limpa após ler
+    res.json(signals);
 });
 
 // --- PÁGINAS ---
