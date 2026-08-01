@@ -321,7 +321,7 @@ app.get('/group/messages/:groupId', (req, res) => {
 // --- MENSAGENS ---
 
 app.post('/send_message', async (req, res) => {
-    const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup } = req.body;
+    const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup, unlockTimestamp } = req.body;
     const target = isGroup ? groups.find(g => g.id === recipient) : users.find(u => u.username === recipient);
     if (!isGroup && target && target.blockedUsers && target.blockedUsers.includes(username)) return res.json({ status: 'ok' });
     let finalContent = content;
@@ -329,7 +329,7 @@ app.post('/send_message', async (req, res) => {
         const b2Url = await uploadToB2(Buffer.from(content, 'base64'), `media_${Date.now()}_${username}`);
         if (b2Url) finalContent = b2Url;
     }
-    const msgData = { id: Date.now(), from: username, to: recipient, content: finalContent, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false, delivered: false };
+    const msgData = { id: Date.now(), from: username, to: recipient, content: finalContent, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false, delivered: false, unlockTimestamp: unlockTimestamp || null };
     messages.push(msgData);
     res.status(200).json({ status: 'ok' });
     if (db) db.collection('messages').doc(msgData.id.toString()).set(msgData).catch(() => {});
