@@ -391,6 +391,11 @@ app.get('/call/check/:username', (req, res) => {
     const u = req.params.username;
     const signals = callSignals[u] || [];
     callSignals[u] = []; // Limpa após ler
+
+    // ENVIAR CABEÇALHOS DE ATUALIZAÇÃO PARA O APP DETECTAR 🚀 ✅
+    res.setHeader('X-Latest-Version', latestVersionCode.toString());
+    res.setHeader('X-Apk-Name', latestApkName || "");
+
     res.json(signals);
 });
 
