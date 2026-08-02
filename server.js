@@ -447,6 +447,34 @@ app.post('/delete_message', async (req, res) => {
     } else res.status(403).send('Erro: Mensagem não encontrada ou sem permissão');
 });
 
+app.post('/delete_conversation', async (req, res) => {
+    const { username, contact } = req.body;
+    try {
+        // Filtra quais mensagens devem ser apagadas (RAM)
+        const toDelete = messages.filter(m =>
+            !m.isGroup &&
+            ((m.from === username && m.to === contact) || (m.from === contact && m.to === username))
+        );
+
+        // Remove da RAM ⚡
+        messages = messages.filter(m => !toDelete.includes(m));
+
+        res.json({ status: 'ok' });
+
+        // Remove do Firestore (Cofre) 🛡️
+        if (db && toDelete.length > 0) {
+            const batch = db.batch();
+            toDelete.forEach(m => {
+                batch.delete(db.collection('messages').doc(m.id.toString()));
+            });
+            await batch.commit();
+        }
+    } catch (e) {
+        console.error("Erro ao apagar conversa:", e.message);
+        if (!res.headersSent) res.status(500).send(e.message);
+    }
+});
+
 app.post('/destroy_view_once', async (req, res) => {
     const { messageId, username } = req.body;
     const idx = messages.findIndex(m => m.id === messageId && (m.from === username || m.to === username));
