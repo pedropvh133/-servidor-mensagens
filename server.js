@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.46 (ULTRA STABILITY)
- * ESTABILIZAÇÃO TOTAL: Persistência Blindada, Endpoints de Exclusão e Sincronia Real.
+ * NOCTIS MESSENGER - SERVER V20.47 (ULTRA STABILITY + STREAMING)
+ * ESTABILIZAÇÃO TOTAL: Upload por Stream, Persistência Blindada e Anti-Timeout.
  */
 
 const express = require('express');
@@ -85,7 +85,6 @@ async function loadDataFromBackup() {
         users = userSnap.docs.map(d => d.data());
         const groupSnap = await db.collection('groups').get();
         groups = groupSnap.docs.map(d => d.data());
-        // Aumentado limite de mensagens para 3000 e ordenado por tempo
         const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(3000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
 
@@ -112,11 +111,11 @@ function notifyGroupChange(groupId, adminSender, type = "GROUP_STATE_CHANGED") {
     });
 }
 
-// --- MIDIA ---
+// --- MIDIA (OTIMIZADA COM STREAMS) ---
 let b2AuthCache = null;
 let b2AuthTime = 0;
 
-async function uploadToB2(bufferData, fileName) {
+async function uploadToB2(dataOrPath, fileName, isFilePath = false) {
     if (!B2_BUCKET_ID) return null;
     try {
         if (!b2AuthCache || (Date.now() - b2AuthTime > 12 * 60 * 60 * 1000)) {
@@ -125,12 +124,22 @@ async function uploadToB2(bufferData, fileName) {
             b2AuthTime = Date.now();
         }
         const uploadUrlResp = await b2.getUploadUrl({ bucketId: B2_BUCKET_ID });
-        const uploadResp = await b2.uploadFile({
+
+        let uploadParams = {
             uploadUrl: uploadUrlResp.data.uploadUrl,
             uploadAuthToken: uploadUrlResp.data.authorizationToken,
-            fileName: fileName,
-            data: bufferData
-        });
+            fileName: fileName
+        };
+
+        if (isFilePath) {
+            const stats = fs.statSync(dataOrPath);
+            uploadParams.data = fs.createReadStream(dataOrPath);
+            uploadParams.contentLength = stats.size;
+        } else {
+            uploadParams.data = dataOrPath;
+        }
+
+        const uploadResp = await b2.uploadFile(uploadParams);
         return `B2_URL:${uploadResp.data.fileName}`;
     } catch (e) {
         console.error("Erro B2:", e.message);
@@ -148,15 +157,20 @@ app.post('/admin/upload_apk', upload.single('apkFile'), async (req, res) => {
     const { versionCode, password } = req.body;
     if (password !== "pedropvh133@gmail.com/admin") return res.status(403).send('Senha Incorreta');
     if (!req.file) return res.status(400).send('Arquivo não enviado');
+
+    // Evita timeout precoce do Render mantendo a conexão "viva"
+    res.setHeader('Connection', 'keep-alive');
+
     try {
         const fileName = `update_v${versionCode}_${Date.now()}.apk`;
-        const fileBuffer = fs.readFileSync(req.file.path);
-        const b2Url = await uploadToB2(fileBuffer, fileName);
+        // Usa Stream em vez de readFileSync para poupar RAM ⚡
+        const b2Url = await uploadToB2(req.file.path, fileName, true);
+
         if (b2Url) {
             latestVersionCode = parseInt(versionCode);
             latestApkName = fileName;
             if (db) await db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName });
-            fs.unlinkSync(req.file.path);
+            if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
             res.json({ status: 'ok', versionCode: latestVersionCode, apkName: latestApkName });
         } else res.status(500).send('Erro no B2 Cloud');
     } catch (e) { res.status(500).send('Erro interno: ' + e.message); }
@@ -413,17 +427,14 @@ app.post('/clear_messages', async (req, res) => {
     const { username, password } = req.body;
     const user = users.find(u => u.username === username && u.password === password);
     if (user) {
-        // Remove apenas as mensagens onde o usuário é o remetente (simplificação)
         messages = messages.filter(m => m.from !== username);
         res.json({ status: 'ok' });
-        // No Firestore real precisaria de um batch delete, mas para fins de RAM/Demo limpamos local
     } else res.status(401).send('Erro');
 });
 
 app.get('/conversation/:u1/:u2', async (req, res) => {
     const list = messages.filter(m => !m.isGroup && ((m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1)));
 
-    // Marca como entregue
     for (let m of messages) {
         if (!m.isGroup && m.from === req.params.u2 && m.to === req.params.u1 && !m.delivered) {
             m.delivered = true;
@@ -481,10 +492,8 @@ app.get('/call/check/:username', (req, res) => {
     const u = req.params.username;
     const signals = callSignals[u] || [];
     callSignals[u] = []; // Limpa após ler
-
     res.setHeader('X-Latest-Version', latestVersionCode.toString());
     res.setHeader('X-Apk-Name', latestApkName || "");
-
     res.json(signals);
 });
 
@@ -581,12 +590,13 @@ app.get('/admin', (req, res) => {
                         if (event.lengthComputable) {
                             const percent = Math.round((event.loaded / event.total) * 100);
                             progressBar.style.width = percent + "%";
-                            percentText.innerText = percent + "%";
+                            percentText.innerText = (percent === 100) ? "100% - Finalizando na Nuvem..." : percent + "%";
+                            if(percent === 100) msg.innerText = "⌛ Quase lá! O servidor está processando seu APK...";
                         }
                     };
                     xhr.onload = () => {
                         if (xhr.status === 200) {
-                            msg.style.color = "#00F260"; msg.innerText = "✅ SUCESSO!";
+                            msg.style.color = "#00F260"; msg.innerText = "✅ SUCESSO! A versão foi lançada.";
                             setTimeout(() => location.reload(), 3000);
                         } else {
                             msg.style.color = "#FF4B2B"; msg.innerText = "❌ ERRO: " + xhr.responseText;
@@ -600,7 +610,7 @@ app.get('/admin', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.46</h1><p>Status: ONLINE ✅ | Vault: SECURE 🔐</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.47</h1><p>Status: ONLINE ✅ | Vault: SECURE 🔐</p>`);
 });
 
-app.listen(port, () => console.log(`Noctis v20.46 pronto.`));
+app.listen(port, () => console.log(`Noctis v20.47 pronto.`));
