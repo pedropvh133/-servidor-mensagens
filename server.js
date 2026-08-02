@@ -134,13 +134,16 @@ let b2AuthCache = null;
 let b2AuthTime = 0;
 
 async function uploadToB2(dataOrPath, fileName, isFilePath = false) {
-    if (!B2_BUCKET_ID) return null;
+    if (!B2_BUCKET_ID) {
+        console.error("Erro B2: B2_BUCKET_ID não configurado.");
+        return null;
+    }
     try {
-        if (!b2AuthCache || (Date.now() - b2AuthTime > 12 * 60 * 60 * 1000)) {
-            await b2.authorize();
-            b2AuthCache = true;
-            b2AuthTime = Date.now();
-        }
+        // Re-autoriza sempre para garantir que o token não expirou durante o upload de arquivos grandes
+        await b2.authorize();
+        b2AuthCache = true;
+        b2AuthTime = Date.now();
+
         const uploadUrlResp = await b2.getUploadUrl({ bucketId: B2_BUCKET_ID });
 
         let uploadParams = {
@@ -151,7 +154,6 @@ async function uploadToB2(dataOrPath, fileName, isFilePath = false) {
 
         if (isFilePath) {
             const stats = fs.statSync(dataOrPath);
-            // BACKBLAZE EXIGE SHA1 PARA STREAMING! ✅🚀
             const sha1 = await getFileSHA1(dataOrPath);
             uploadParams.data = fs.createReadStream(dataOrPath);
             uploadParams.contentLength = stats.size;
@@ -163,7 +165,9 @@ async function uploadToB2(dataOrPath, fileName, isFilePath = false) {
         const uploadResp = await b2.uploadFile(uploadParams);
         return `B2_URL:${uploadResp.data.fileName}`;
     } catch (e) {
-        console.error("Erro B2:", e.message);
+        // Log detalhado para o administrador no console do Render 🛡️
+        const errorDetail = e.response ? JSON.stringify(e.response.data) : e.message;
+        console.error("Falha Crítica B2:", errorDetail);
         b2AuthCache = null;
         return null;
     }
@@ -637,98 +641,178 @@ app.get('/b2file/:filename', async (req, res) => {
 });
 
 app.get('/admin', (req, res) => {
+    const totalUsers = users.length;
+    const onlineUsers = users.filter(u => (Date.now() - (u.lastSeen || 0)) < 60000).length;
+
     res.send(`
-        <body style="background: #0A0E14; color: white; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px;">
-            <div style="background: rgba(30, 41, 59, 0.7); padding: 40px; border-radius: 20px; border: 1px solid #00D2FF; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); backdrop-filter: blur(10px); width: 100%; max-width: 450px; text-align: center;">
-                <h1 style="color: #00D2FF; margin-bottom: 30px; letter-spacing: 2px;">🛰️ MASTER CONTROL</h1>
+        <!DOCTYPE html>
+        <html lang="pt-br">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>NOCTIS MASTER - Painel de Controle</title>
+            <style>
+                :root { --accent: #00D2FF; --bg: #0A0E14; --glass: rgba(30, 41, 59, 0.7); }
+                body { background: var(--bg); color: white; font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 20px; display: flex; justify-content: center; }
+                .container { width: 100%; max-width: 500px; }
+                .card { background: var(--glass); padding: 30px; border-radius: 24px; border: 1px solid rgba(0, 210, 255, 0.2); backdrop-filter: blur(12px); box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+                h1 { color: var(--accent); text-align: center; letter-spacing: 2px; font-size: 24px; margin-bottom: 30px; }
 
-                <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 10px; margin-bottom: 25px; text-align: left; font-size: 14px;">
-                    <p style="margin: 5px 0;">🔥 Firebase: <span style="color: #00F260">${firebaseStatus}</span></p>
-                    <p style="margin: 5px 0;">☁️ B2 Cloud: <span style="color: #00F260">${b2Status}</span></p>
-                    <p style="margin: 5px 0;">📱 Versão Atual: <span style="color: #FF00FF">${latestVersionCode}</span></p>
-                </div>
+                .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 25px; }
+                .stat-box { background: rgba(0,0,0,0.3); padding: 15px; border-radius: 16px; text-align: center; border: 1px solid rgba(255,255,255,0.05); }
+                .stat-val { display: block; font-size: 22px; font-weight: bold; color: var(--accent); }
+                .stat-label { font-size: 11px; color: #94A3B8; text-transform: uppercase; margin-top: 5px; }
 
-                <!-- FORM 1: UPLOAD APK -->
-                <div style="border: 1px solid #334155; padding: 20px; border-radius: 12px; margin-bottom: 20px;">
-                    <h3 style="color: #00D2FF; margin-top: 0;">🚀 LANÇAR ATUALIZAÇÃO</h3>
-                    <form id="uploadForm" style="display: flex; flex-direction: column; gap: 15px;">
-                        <input name="versionCode" type="number" placeholder="Nova Versão" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
-                        <input name="apkFile" type="file" accept=".apk" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 10px; border-radius: 8px; outline: none; box-sizing: border-box; font-size: 12px;">
-                        <input name="password" type="password" placeholder="Senha Master" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
-                        <button type="submit" style="background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; border: none; padding: 15px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s;">SUBIR E LANÇAR</button>
-                    </form>
-                    <div id="progressBox" style="display: none; margin-top: 20px;">
-                        <div style="width: 100%; background: #1E293B; height: 10px; border-radius: 5px; overflow: hidden;">
-                            <div id="progressBar" style="width: 0%; height: 100%; background: #00F260; transition: 0.3s;"></div>
+                .status-list { background: rgba(0,0,0,0.2); padding: 15px; border-radius: 16px; margin-bottom: 30px; font-size: 13px; }
+                .status-item { display: flex; justify-content: space-between; margin-bottom: 8px; }
+                .status-dot { color: #00F260; font-weight: bold; }
+
+                .form-group { margin-bottom: 20px; }
+                label { display: block; font-size: 12px; color: #94A3B8; margin-bottom: 8px; margin-left: 5px; }
+                input { width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 14px; border-radius: 12px; outline: none; box-sizing: border-box; transition: 0.3s; }
+                input:focus { border-color: var(--accent); box-shadow: 0 0 10px rgba(0, 210, 255, 0.1); }
+
+                button { width: 100%; background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; border: none; padding: 16px; border-radius: 12px; font-weight: bold; cursor: pointer; transition: 0.3s; text-transform: uppercase; letter-spacing: 1px; }
+                button:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0, 210, 255, 0.3); }
+
+                .progress-container { display: none; margin-top: 20px; }
+                .progress-bar { width: 100%; background: #1E293B; height: 8px; border-radius: 4px; overflow: hidden; }
+                .progress-fill { width: 0%; height: 100%; background: var(--accent); transition: 0.1s; }
+                .progress-text { font-size: 10px; color: var(--accent); margin-top: 8px; text-align: right; }
+
+                #msg { text-align: center; margin-top: 20px; font-size: 13px; min-height: 1.2em; }
+                hr { border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 30px 0; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="card">
+                    <h1>🛰️ MASTER CONTROL</h1>
+
+                    <div class="stats-grid">
+                        <div class="stat-box">
+                            <span class="stat-val">${totalUsers}</span>
+                            <span class="stat-label">Instalações</span>
                         </div>
-                        <p id="percent" style="font-size: 10px; color: #00F260; margin-top: 5px;">0%</p>
+                        <div class="stat-box">
+                            <span class="stat-val">${onlineUsers}</span>
+                            <span class="stat-label">Online Agora</span>
+                        </div>
                     </div>
-                </div>
 
-                <!-- FORM 2: TROCAR SENHA -->
-                <div style="border: 1px solid #334155; padding: 20px; border-radius: 12px;">
-                    <h3 style="color: #FF00FF; margin-top: 0;">🔑 GESTÃO DE ACESSO</h3>
-                    <form id="passForm" style="display: flex; flex-direction: column; gap: 15px;">
-                        <input name="oldPassword" type="password" placeholder="Senha Atual" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
-                        <input name="newPassword" type="password" placeholder="Nova Senha Master" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
-                        <button type="submit" style="background: #FF00FF; color: white; border: none; padding: 15px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s;">ALTERAR SENHA MASTER</button>
+                    <div class="status-list">
+                        <div class="status-item"><span>🔥 Firebase System</span> <span class="status-dot">${firebaseStatus}</span></div>
+                        <div class="status-item"><span>☁️ Cloud B2 Storage</span> <span class="status-dot">${b2Status}</span></div>
+                        <div class="status-item"><span>📱 Versão Ativa</span> <span class="status-dot">${latestVersionCode}</span></div>
+                    </div>
+
+                    <form id="masterForm">
+                        <div class="form-group">
+                            <label>Versão Obrigatória (Número)</label>
+                            <input name="versionCode" type="number" value="${latestVersionCode}" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Arquivo APK (.apk)</label>
+                            <input name="apkFile" type="file" accept=".apk">
+                        </div>
+                        <div class="form-group">
+                            <label>Senha Master de Segurança</label>
+                            <input name="password" type="password" placeholder="Digite para autorizar" required>
+                        </div>
+                        <button type="submit">APLICAR MUDANÇAS 🚀</button>
+                    </form>
+
+                    <div class="progress-container" id="progressBox">
+                        <div class="progress-bar"><div class="progress-fill" id="progressBar"></div></div>
+                        <div class="progress-text" id="percent">0%</div>
+                    </div>
+
+                    <p id="msg"></p>
+
+                    <hr>
+
+                    <form id="passForm">
+                        <div class="form-group">
+                            <label>Alterar Senha de Acesso</label>
+                            <input name="oldPassword" type="password" placeholder="Senha Atual" required style="margin-bottom:10px">
+                            <input name="newPassword" type="password" placeholder="Nova Senha Master" required>
+                        </div>
+                        <button type="submit" style="background: #1E293B; color: white; font-size: 11px; padding: 12px;">ATUALIZAR CHAVE MESTRA 🔑</button>
                     </form>
                 </div>
-
-                <p id="msg" style="margin-top: 20px; font-size: 12px; color: #94A3B8;"></p>
             </div>
 
             <script>
                 const msg = document.getElementById('msg');
+                const masterForm = document.getElementById('masterForm');
 
-                // Lógica de Upload
-                document.getElementById('uploadForm').onsubmit = async (e) => {
+                masterForm.onsubmit = async (e) => {
                     e.preventDefault();
-                    const formData = new FormData(e.target);
+                    const formData = new FormData(masterForm);
                     const progressBox = document.getElementById('progressBox');
                     const progressBar = document.getElementById('progressBar');
                     const percentText = document.getElementById('percent');
 
-                    msg.style.color = "#94A3B8"; msg.innerText = "📡 Enviando...";
-                    progressBox.style.display = "block";
+                    msg.style.color = "#94A3B8"; msg.innerText = "📡 Sincronizando dados...";
 
-                    const xhr = new XMLHttpRequest();
-                    xhr.open('POST', '/admin/upload_apk', true);
-                    xhr.upload.onprogress = (ev) => {
-                        if (ev.lengthComputable) {
-                            const p = Math.round((ev.loaded / ev.total) * 100);
-                            progressBar.style.width = p + "%";
-                            percentText.innerText = (p === 100) ? "100% - Finalizando na Nuvem..." : p + "%";
-                        }
-                    };
-                    xhr.onload = () => {
-                        if (xhr.status === 200) {
-                            msg.style.color = "#00F260"; msg.innerText = "✅ SUCESSO!";
-                            setTimeout(() => location.reload(), 2000);
+                    const hasFile = formData.get('apkFile').size > 0;
+
+                    if (hasFile) {
+                        progressBox.style.display = "block";
+                        const xhr = new XMLHttpRequest();
+                        xhr.open('POST', '/admin/upload_apk', true);
+                        xhr.upload.onprogress = (ev) => {
+                            if (ev.lengthComputable) {
+                                const p = Math.round((ev.loaded / ev.total) * 100);
+                                progressBar.style.width = p + "%";
+                                percentText.innerText = (p === 100) ? "Finalizando no B2 Cloud..." : p + "%";
+                            }
+                        };
+                        xhr.onload = () => {
+                            if (xhr.status === 200) {
+                                msg.style.color = "#00F260"; msg.innerText = "✅ TUDO ATUALIZADO!";
+                                setTimeout(() => location.reload(), 1500);
+                            } else {
+                                msg.style.color = "#FF4B2B"; msg.innerText = "❌ ERRO: " + xhr.responseText;
+                                progressBox.style.display = "none";
+                            }
+                        };
+                        xhr.send(formData);
+                    } else {
+                        // Apenas atualizar versão se não enviou arquivo
+                        const data = {
+                            versionCode: formData.get('versionCode'),
+                            password: formData.get('password')
+                        };
+                        const resp = await fetch('/admin/update_version', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(data)
+                        });
+                        if (resp.ok) {
+                            msg.style.color = "#00F260"; msg.innerText = "✅ VERSÃO ATUALIZADA!";
+                            setTimeout(() => location.reload(), 1500);
                         } else {
-                            msg.style.color = "#FF4B2B"; msg.innerText = "❌ ERRO: " + xhr.responseText;
+                            const txt = await resp.text();
+                            msg.style.color = "#FF4B2B"; msg.innerText = "❌ ERRO: " + txt;
                         }
-                    };
-                    xhr.send(formData);
+                    }
                 };
 
-                // Lógica de Troca de Senha
                 document.getElementById('passForm').onsubmit = async (e) => {
                     e.preventDefault();
                     const data = {
                         oldPassword: e.target.oldPassword.value,
                         newPassword: e.target.newPassword.value
                     };
-                    msg.style.color = "#94A3B8"; msg.innerText = "🔑 Processando...";
-
+                    msg.style.color = "#94A3B8"; msg.innerText = "🔑 Alterando acesso...";
                     const resp = await fetch('/admin/change_password', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(data)
                     });
-
                     if (resp.ok) {
-                        msg.style.color = "#00F260"; msg.innerText = "✅ SENHA ALTERADA! Guarde bem.";
+                        msg.style.color = "#00F260"; msg.innerText = "✅ SENHA MUDOU! Não esqueça.";
                         e.target.reset();
                     } else {
                         const txt = await resp.text();
@@ -737,6 +821,7 @@ app.get('/admin', (req, res) => {
                 };
             </script>
         </body>
+        </html>
     `);
 });
 
