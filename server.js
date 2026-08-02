@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.47 (ULTRA STABILITY + STREAMING)
- * ESTABILIZAÇÃO TOTAL: Upload por Stream, Persistência Blindada e Anti-Timeout.
+ * NOCTIS MESSENGER - SERVER V20.48 (SECURITY + INTEGRITY)
+ * ESTABILIZAÇÃO TOTAL: SHA1 Checksum, Senha Admin Dinâmica e Motor Anti-Sono.
  */
 
 const express = require('express');
@@ -9,7 +9,8 @@ const cors = require('cors');
 const admin = require('firebase-admin');
 const B2 = require('backblaze-b2');
 const multer = require('multer');
-const https = require('https'); // Importado para o motor anti-sono 🚀
+const https = require('https');
+const crypto = require('crypto'); // Para cálculo de integridade (SHA1) 🔒
 const fs = require('fs');
 const path = require('path');
 const upload = multer({ dest: '/tmp/' });
@@ -26,7 +27,8 @@ let firebaseStatus = "Aguardando... ⚪";
 let b2Status = "Aguardando... ⚪";
 let cachedBucketName = null;
 
-// --- CONTROLE DE VERSÃO ---
+// --- CONTROLE DE ACESSO ---
+let adminPassword = "pedropvh133@gmail.com/admin"; // Senha padrão (backup)
 let latestVersionCode = 1;
 let latestApkName = "";
 
@@ -93,6 +95,10 @@ async function loadDataFromBackup() {
         if (configDoc.exists) {
             latestVersionCode = configDoc.data().versionCode || 1;
             latestApkName = configDoc.data().apkName || "";
+            // Carrega a senha admin personalizada se existir 🔑
+            if (configDoc.data().adminPassword) {
+                adminPassword = configDoc.data().adminPassword;
+            }
         }
     } catch (e) { console.error('Erro Backup:', e.message); }
 }
@@ -112,7 +118,18 @@ function notifyGroupChange(groupId, adminSender, type = "GROUP_STATE_CHANGED") {
     });
 }
 
-// --- MIDIA (OTIMIZADA COM STREAMS) ---
+// --- FUNÇÃO AUXILIAR: SHA1 HASH 🛡️ ---
+function getFileSHA1(filePath) {
+    return new Promise((resolve, reject) => {
+        const hash = crypto.createHash('sha1');
+        const stream = fs.createReadStream(filePath);
+        stream.on('data', (data) => hash.update(data));
+        stream.on('end', () => resolve(hash.digest('hex')));
+        stream.on('error', (err) => reject(err));
+    });
+}
+
+// --- MIDIA (OTIMIZADA COM STREAMS + SHA1) ---
 let b2AuthCache = null;
 let b2AuthTime = 0;
 
@@ -134,8 +151,11 @@ async function uploadToB2(dataOrPath, fileName, isFilePath = false) {
 
         if (isFilePath) {
             const stats = fs.statSync(dataOrPath);
+            // BACKBLAZE EXIGE SHA1 PARA STREAMING! ✅🚀
+            const sha1 = await getFileSHA1(dataOrPath);
             uploadParams.data = fs.createReadStream(dataOrPath);
             uploadParams.contentLength = stats.size;
+            uploadParams.contentSha1 = sha1;
         } else {
             uploadParams.data = dataOrPath;
         }
@@ -156,21 +176,23 @@ app.use(bodyParser.json({ limit: '100mb' }));
 
 app.post('/admin/upload_apk', upload.single('apkFile'), async (req, res) => {
     const { versionCode, password } = req.body;
-    if (password !== "pedropvh133@gmail.com/admin") return res.status(403).send('Senha Incorreta');
+    if (password !== adminPassword) return res.status(403).send('Senha Incorreta');
     if (!req.file) return res.status(400).send('Arquivo não enviado');
 
-    // Evita timeout precoce do Render mantendo a conexão "viva"
     res.setHeader('Connection', 'keep-alive');
 
     try {
         const fileName = `update_v${versionCode}_${Date.now()}.apk`;
-        // Usa Stream em vez de readFileSync para poupar RAM ⚡
         const b2Url = await uploadToB2(req.file.path, fileName, true);
 
         if (b2Url) {
             latestVersionCode = parseInt(versionCode);
             latestApkName = fileName;
-            if (db) await db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName });
+            if (db) await db.collection('system').doc('config').set({
+                versionCode: latestVersionCode,
+                apkName: latestApkName,
+                adminPassword: adminPassword
+            }, { merge: true });
             if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
             res.json({ status: 'ok', versionCode: latestVersionCode, apkName: latestApkName });
         } else res.status(500).send('Erro no B2 Cloud');
@@ -179,11 +201,24 @@ app.post('/admin/upload_apk', upload.single('apkFile'), async (req, res) => {
 
 app.post('/admin/update_version', async (req, res) => {
     const { versionCode, apkName, password } = req.body;
-    if (password !== "pedropvh133@gmail.com/admin") return res.status(403).send('Negado');
+    if (password !== adminPassword) return res.status(403).send('Negado');
     latestVersionCode = parseInt(versionCode);
     latestApkName = apkName;
     res.json({ status: 'ok', versionCode: latestVersionCode, apkName: latestApkName });
-    if (db) await db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName });
+    if (db) await db.collection('system').doc('config').set({
+        versionCode: latestVersionCode,
+        apkName: latestApkName
+    }, { merge: true });
+});
+
+app.post('/admin/change_password', async (req, res) => {
+    const { oldPassword, newPassword } = req.body;
+    if (oldPassword !== adminPassword) return res.status(403).send('Senha Atual Incorreta');
+    if (!newPassword || newPassword.length < 4) return res.status(400).send('Senha muito curta');
+
+    adminPassword = newPassword;
+    if (db) await db.collection('system').doc('config').set({ adminPassword: adminPassword }, { merge: true });
+    res.json({ status: 'ok' });
 });
 
 // --- USUÁRIO ---
@@ -343,7 +378,6 @@ app.post('/group/remove_member', async (req, res) => {
         group.admins = group.admins.filter(a => a !== targetUser);
         res.status(200).json(group);
 
-        // Sinaliza ao usuário removido
         if (!callSignals[targetUser]) callSignals[targetUser] = [];
         callSignals[targetUser].push({ from: adminUser, data: Buffer.from(`REMOVED_FROM_GROUP:${groupId}`).toString('base64'), time: Date.now() });
 
@@ -415,7 +449,6 @@ app.post('/delete_message', async (req, res) => {
 
 app.post('/destroy_view_once', async (req, res) => {
     const { messageId, username } = req.body;
-    // Qualquer um dos dois pode destruir se for visualização única
     const idx = messages.findIndex(m => m.id === messageId && (m.from === username || m.to === username));
     if (idx !== -1) {
         messages.splice(idx, 1);
@@ -551,59 +584,99 @@ app.get('/admin', (req, res) => {
         <body style="background: #0A0E14; color: white; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px;">
             <div style="background: rgba(30, 41, 59, 0.7); padding: 40px; border-radius: 20px; border: 1px solid #00D2FF; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); backdrop-filter: blur(10px); width: 100%; max-width: 450px; text-align: center;">
                 <h1 style="color: #00D2FF; margin-bottom: 30px; letter-spacing: 2px;">🛰️ MASTER CONTROL</h1>
+
                 <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 10px; margin-bottom: 25px; text-align: left; font-size: 14px;">
                     <p style="margin: 5px 0;">🔥 Firebase: <span style="color: #00F260">${firebaseStatus}</span></p>
                     <p style="margin: 5px 0;">☁️ B2 Cloud: <span style="color: #00F260">${b2Status}</span></p>
                     <p style="margin: 5px 0;">📱 Versão Atual: <span style="color: #FF00FF">${latestVersionCode}</span></p>
                 </div>
-                <form id="uploadForm" style="display: flex; flex-direction: column; gap: 15px;">
-                    <input name="versionCode" type="number" placeholder="Nova Versão" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
-                    <input name="apkFile" type="file" accept=".apk" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 10px; border-radius: 8px; outline: none; box-sizing: border-box; font-size: 12px;">
-                    <input name="password" type="password" placeholder="Senha Master" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
-                    <button type="submit" style="background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; border: none; padding: 15px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 10px;">🚀 SUBIR E LANÇAR ATUALIZAÇÃO</button>
-                </form>
-                <div id="progressBox" style="display: none; margin-top: 20px;">
-                    <div style="width: 100%; background: #1E293B; height: 10px; border-radius: 5px; overflow: hidden;">
-                        <div id="progressBar" style="width: 0%; height: 100%; background: #00F260; transition: 0.3s;"></div>
+
+                <!-- FORM 1: UPLOAD APK -->
+                <div style="border: 1px solid #334155; padding: 20px; border-radius: 12px; margin-bottom: 20px;">
+                    <h3 style="color: #00D2FF; margin-top: 0;">🚀 LANÇAR ATUALIZAÇÃO</h3>
+                    <form id="uploadForm" style="display: flex; flex-direction: column; gap: 15px;">
+                        <input name="versionCode" type="number" placeholder="Nova Versão" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
+                        <input name="apkFile" type="file" accept=".apk" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 10px; border-radius: 8px; outline: none; box-sizing: border-box; font-size: 12px;">
+                        <input name="password" type="password" placeholder="Senha Master" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
+                        <button type="submit" style="background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; border: none; padding: 15px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s;">SUBIR E LANÇAR</button>
+                    </form>
+                    <div id="progressBox" style="display: none; margin-top: 20px;">
+                        <div style="width: 100%; background: #1E293B; height: 10px; border-radius: 5px; overflow: hidden;">
+                            <div id="progressBar" style="width: 0%; height: 100%; background: #00F260; transition: 0.3s;"></div>
+                        </div>
+                        <p id="percent" style="font-size: 10px; color: #00F260; margin-top: 5px;">0%</p>
                     </div>
-                    <p id="percent" style="font-size: 10px; color: #00F260; margin-top: 5px;">0%</p>
                 </div>
+
+                <!-- FORM 2: TROCAR SENHA -->
+                <div style="border: 1px solid #334155; padding: 20px; border-radius: 12px;">
+                    <h3 style="color: #FF00FF; margin-top: 0;">🔑 GESTÃO DE ACESSO</h3>
+                    <form id="passForm" style="display: flex; flex-direction: column; gap: 15px;">
+                        <input name="oldPassword" type="password" placeholder="Senha Atual" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
+                        <input name="newPassword" type="password" placeholder="Nova Senha Master" style="width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; outline: none; box-sizing: border-box;">
+                        <button type="submit" style="background: #FF00FF; color: white; border: none; padding: 15px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s;">ALTERAR SENHA MASTER</button>
+                    </form>
+                </div>
+
                 <p id="msg" style="margin-top: 20px; font-size: 12px; color: #94A3B8;"></p>
             </div>
+
             <script>
-                const form = document.getElementById('uploadForm');
                 const msg = document.getElementById('msg');
-                const progressBox = document.getElementById('progressBox');
-                const progressBar = document.getElementById('progressBar');
-                const percentText = document.getElementById('percent');
-                form.onsubmit = async (e) => {
+
+                // Lógica de Upload
+                document.getElementById('uploadForm').onsubmit = async (e) => {
                     e.preventDefault();
-                    const formData = new FormData(form);
-                    if(!formData.get('versionCode') || !formData.get('apkFile').name || !formData.get('password')) {
-                        msg.style.color = "#FF4B2B"; msg.innerText = "⚠️ Preencha todos os campos."; return;
-                    }
+                    const formData = new FormData(e.target);
+                    const progressBox = document.getElementById('progressBox');
+                    const progressBar = document.getElementById('progressBar');
+                    const percentText = document.getElementById('percent');
+
                     msg.style.color = "#94A3B8"; msg.innerText = "📡 Enviando...";
                     progressBox.style.display = "block";
+
                     const xhr = new XMLHttpRequest();
                     xhr.open('POST', '/admin/upload_apk', true);
-                    xhr.timeout = 0;
-                    xhr.upload.onprogress = (event) => {
-                        if (event.lengthComputable) {
-                            const percent = Math.round((event.loaded / event.total) * 100);
-                            progressBar.style.width = percent + "%";
-                            percentText.innerText = (percent === 100) ? "100% - Finalizando na Nuvem..." : percent + "%";
-                            if(percent === 100) msg.innerText = "⌛ Quase lá! O servidor está processando seu APK...";
+                    xhr.upload.onprogress = (ev) => {
+                        if (ev.lengthComputable) {
+                            const p = Math.round((ev.loaded / ev.total) * 100);
+                            progressBar.style.width = p + "%";
+                            percentText.innerText = (p === 100) ? "100% - Finalizando na Nuvem..." : p + "%";
                         }
                     };
                     xhr.onload = () => {
                         if (xhr.status === 200) {
-                            msg.style.color = "#00F260"; msg.innerText = "✅ SUCESSO! A versão foi lançada.";
-                            setTimeout(() => location.reload(), 3000);
+                            msg.style.color = "#00F260"; msg.innerText = "✅ SUCESSO!";
+                            setTimeout(() => location.reload(), 2000);
                         } else {
                             msg.style.color = "#FF4B2B"; msg.innerText = "❌ ERRO: " + xhr.responseText;
                         }
                     };
                     xhr.send(formData);
+                };
+
+                // Lógica de Troca de Senha
+                document.getElementById('passForm').onsubmit = async (e) => {
+                    e.preventDefault();
+                    const data = {
+                        oldPassword: e.target.oldPassword.value,
+                        newPassword: e.target.newPassword.value
+                    };
+                    msg.style.color = "#94A3B8"; msg.innerText = "🔑 Processando...";
+
+                    const resp = await fetch('/admin/change_password', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+
+                    if (resp.ok) {
+                        msg.style.color = "#00F260"; msg.innerText = "✅ SENHA ALTERADA! Guarde bem.";
+                        e.target.reset();
+                    } else {
+                        const txt = await resp.text();
+                        msg.style.color = "#FF4B2B"; msg.innerText = "❌ ERRO: " + txt;
+                    }
                 };
             </script>
         </body>
@@ -611,11 +684,10 @@ app.get('/admin', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.47</h1><p>Status: ONLINE ✅ | Vault: SECURE 🔐</p>`);
+    res.send(`<h1>🛰️ NOCTIS Hybrid v20.48</h1><p>Status: ONLINE ✅ | Vault: SECURE 🔐</p>`);
 });
 
 // --- MOTOR ANTI-SONO (KEEP ALIVE) 🚀 ---
-// Faz o servidor se auto-chamar a cada 10 minutos para não dormir no Render
 app.get('/ping', (req, res) => res.send('pong'));
 
 setInterval(() => {
@@ -626,4 +698,4 @@ setInterval(() => {
     });
 }, 10 * 60 * 1000); // 10 minutos
 
-app.listen(port, () => console.log(`Noctis v20.47 pronto.`));
+app.listen(port, () => console.log(`Noctis v20.48 pronto.`));
