@@ -9,6 +9,7 @@ const cors = require('cors');
 const admin = require('firebase-admin');
 const B2 = require('backblaze-b2');
 const multer = require('multer');
+const https = require('https'); // Importado para o motor anti-sono 🚀
 const fs = require('fs');
 const path = require('path');
 const upload = multer({ dest: '/tmp/' });
@@ -612,5 +613,17 @@ app.get('/admin', (req, res) => {
 app.get('/', (req, res) => {
     res.send(`<h1>🛰️ NOCTIS Hybrid v20.47</h1><p>Status: ONLINE ✅ | Vault: SECURE 🔐</p>`);
 });
+
+// --- MOTOR ANTI-SONO (KEEP ALIVE) 🚀 ---
+// Faz o servidor se auto-chamar a cada 10 minutos para não dormir no Render
+app.get('/ping', (req, res) => res.send('pong'));
+
+setInterval(() => {
+    https.get('https://servidor-mensagens.onrender.com/ping', (res) => {
+        console.log('Motor Anti-Sono: Ping efetuado ✅');
+    }).on('error', (err) => {
+        console.error('Motor Anti-Sono: Erro no ping ❌', err.message);
+    });
+}, 10 * 60 * 1000); // 10 minutos
 
 app.listen(port, () => console.log(`Noctis v20.47 pronto.`));
