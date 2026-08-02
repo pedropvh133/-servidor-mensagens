@@ -410,6 +410,22 @@ app.post('/group/promote', async (req, res) => {
     } else res.status(403).send('Erro');
 });
 
+app.post('/group/update_pic', async (req, res) => {
+    const { groupId, adminUser, profilePic } = req.body;
+    try {
+        const group = groups.find(g => g.id === groupId);
+        if (group && group.admins.includes(adminUser)) {
+            const b2Url = await uploadToB2(Buffer.from(profilePic, 'base64'), `group_${groupId}_${Date.now()}`);
+            if (b2Url) {
+                group.profilePic = b2Url;
+                res.status(200).json(group);
+                notifyGroupChange(groupId, adminUser);
+                if (db) await db.collection('groups').doc(groupId).update({ profilePic: b2Url });
+            } else res.status(500).send('B2 Error');
+        } else res.status(403).send('Negado ou não encontrado');
+    } catch (e) { res.status(500).send(e.message); }
+});
+
 app.post('/group/delete', async (req, res) => {
     const { groupId, adminUser } = req.body;
     const idx = groups.findIndex(g => g.id === groupId && g.admins.includes(adminUser));
