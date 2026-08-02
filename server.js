@@ -267,10 +267,23 @@ app.get('/user/info/:username', (req, res) => {
 });
 
 app.get('/conversations/list/:username', (req, res) => {
-    const list = users.map(u => {
+    const me = req.params.username;
+
+    // Identifica todos os usuários com quem tive troca de mensagens (direta)
+    const involvedUsers = new Set();
+    messages.forEach(m => {
+        if (!m.isGroup) {
+            if (m.from === me) involvedUsers.add(m.to);
+            if (m.to === me) involvedUsers.add(m.from);
+        }
+    });
+
+    // Filtra os perfis apenas dos usuários envolvidos
+    const list = users.filter(u => involvedUsers.has(u.username)).map(u => {
         const { password, ...safe } = u;
         return safe;
     });
+
     res.json(list);
 });
 
