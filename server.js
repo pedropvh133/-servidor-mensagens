@@ -488,7 +488,8 @@ app.post('/send_message', async (req, res) => {
         id: Date.now(), from: username, to: recipient, content: finalContent,
         isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(),
         read: false, delivered: false, unlockTimestamp: unlockTimestamp || null,
-        replyToId: replyToId || null, replyText: replyText || null, replySender: replySender || null
+        replyToId: replyToId || null, replyText: replyText || null, replySender: replySender || null,
+        reactions: {}
     };
 
     messages.push(msgData);
@@ -551,6 +552,41 @@ app.post('/clear_messages', async (req, res) => {
         messages = messages.filter(m => m.from !== username);
         res.json({ status: 'ok' });
     } else res.status(401).send('Erro');
+});
+
+app.post('/message/react', async (req, res) => {
+    const { messageId, username, reaction } = req.body;
+    const msg = messages.find(m => m.id === messageId);
+    if (!msg) return res.status(404).send('Mensagem não encontrada');
+
+    if (!msg.reactions) msg.reactions = {};
+
+    // Remove a reação anterior do usuário se existir em qualquer emoji
+    for (let r in msg.reactions) {
+        msg.reactions[r] = msg.reactions[r].filter(u => u !== username);
+        if (msg.reactions[r].length === 0) delete msg.reactions[r];
+    }
+
+    // Adiciona a nova reação (se não for "remover")
+    if (reaction) {
+        if (!msg.reactions[reaction]) msg.reactions[reaction] = [];
+        msg.reactions[reaction].push(username);
+    }
+
+    res.json({ status: 'ok', reactions: msg.reactions });
+
+    // Notifica o destinatário ou grupo sobre a reação 🛰️
+    const target = msg.isGroup ? msg.to : (msg.from === username ? msg.to : msg.from);
+    const signalData = Buffer.from(`REACTION:${messageId}:${reaction || 'REMOVE'}`).toString('base64');
+
+    if (msg.isGroup) {
+        notifyGroupChange(msg.to, username, "REACTION_GROUP"); // Reutiliza lógica de sinal de grupo
+    } else {
+        if (!callSignals[target]) callSignals[target] = [];
+        callSignals[target].push({ from: username, data: signalData, time: Date.now() });
+    }
+
+    if (db) await db.collection('messages').doc(messageId.toString()).update({ reactions: msg.reactions });
 });
 
 app.get('/conversation/:u1/:u2', async (req, res) => {
