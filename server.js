@@ -414,6 +414,32 @@ app.post('/group/promote', async (req, res) => {
     } else res.status(403).send('Erro');
 });
 
+app.post('/group/leave', async (req, res) => {
+    const { groupId, adminUser } = req.body; // No caso de sair, adminUser é quem está saindo
+    const group = groups.find(g => g.id === groupId);
+    if (group && group.members.includes(adminUser)) {
+        group.members = group.members.filter(m => m !== adminUser);
+        group.admins = group.admins.filter(a => a !== adminUser);
+
+        // Se era o último membro, apaga o grupo
+        if (group.members.length === 0) {
+            const idx = groups.indexOf(group);
+            groups.splice(idx, 1);
+            if (db) await db.collection('groups').doc(groupId).delete();
+            return res.json({ status: 'ok', deleted: true });
+        }
+
+        // Se era o único ADM, promove o primeiro da lista
+        if (group.admins.length === 0 && group.members.length > 0) {
+            group.admins.push(group.members[0]);
+        }
+
+        notifyGroupChange(groupId, adminUser);
+        if (db) await db.collection('groups').doc(groupId).update({ members: group.members, admins: group.admins });
+        res.json({ status: 'ok' });
+    } else res.status(404).send('Grupo ou membro não encontrado');
+});
+
 app.post('/group/update_pic', async (req, res) => {
     const { groupId, adminUser, profilePic } = req.body;
     try {
