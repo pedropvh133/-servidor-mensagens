@@ -6,6 +6,8 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
+const http = require('http'); // Adicionado para integrar com Socket.io
+const { Server } = require('socket.io'); // Adicionado Socket.io
 const admin = require('firebase-admin');
 const B2 = require('backblaze-b2');
 const multer = require('multer');
@@ -16,6 +18,11 @@ const path = require('path');
 const upload = multer({ dest: '/tmp/' });
 
 const app = express();
+const server = http.createServer(app); // Criar servidor HTTP a partir do Express
+const io = new Server(server, {
+    cors: { origin: "*", methods: ["GET", "POST"] },
+    maxHttpBufferSize: 1e8 // 100MB para uploads via socket se necessário
+});
 const port = process.env.PORT || 3000;
 
 // --- ESTADO GLOBAL (RAM) ---
@@ -23,6 +30,7 @@ let users = [];
 let messages = [];
 let groups = [];
 let callSignals = {};
+let userSockets = {}; // Mapeamento: username -> [socket_ids] 🛰️ ✅
 let firebaseStatus = "Aguardando... ⚪";
 let b2Status = "Aguardando... ⚪";
 let cachedBucketName = null;
@@ -108,13 +116,24 @@ loadDataFromBackup();
 function notifyGroupChange(groupId, adminSender, type = "GROUP_STATE_CHANGED") {
     const group = groups.find(g => g.id === groupId);
     if (!group) return;
+
+    const signal = {
+        from: adminSender,
+        data: Buffer.from(`${type}:${groupId}`).toString('base64'),
+        time: Date.now(),
+        groupId: groupId,
+        groupName: group.name
+    };
+
     group.members.forEach(member => {
+        // Envio Legado (Polling)
         if (!callSignals[member]) callSignals[member] = [];
-        callSignals[member].push({
-            from: adminSender,
-            data: Buffer.from(`${type}:${groupId}`).toString('base64'),
-            time: Date.now()
-        });
+        callSignals[member].push(signal);
+
+        // Envio Instantâneo (Socket) ⚡ ✅
+        if (userSockets[member]) {
+            userSockets[member].forEach(sid => io.to(sid).emit('call_signal', signal));
+        }
     });
 }
 
@@ -494,6 +513,23 @@ app.post('/send_message', async (req, res) => {
 
     messages.push(msgData);
     res.status(200).json({ status: 'ok' });
+
+    // ENTREGA INSTANTÂNEA VIA SOCKET 🚀 ✅
+    if (isGroup) {
+        const group = groups.find(g => g.id === recipient);
+        if (group) {
+            group.members.forEach(member => {
+                if (member !== username && userSockets[member]) {
+                    userSockets[member].forEach(sid => io.to(sid).emit('new_message', { ...msgData, groupName: group.name }));
+                }
+            });
+        }
+    } else {
+        if (userSockets[recipient]) {
+            userSockets[recipient].forEach(sid => io.to(sid).emit('new_message', msgData));
+        }
+    }
+
     if (db) await db.collection('messages').doc(msgData.id.toString()).set(msgData);
 });
 
@@ -576,14 +612,23 @@ app.post('/message/react', async (req, res) => {
     res.json({ status: 'ok', reactions: msg.reactions });
 
     // Notifica o destinatário ou grupo sobre a reação 🛰️
-    const target = msg.isGroup ? msg.to : (msg.from === username ? msg.to : msg.from);
-    const signalData = Buffer.from(`REACTION:${messageId}:${reaction || 'REMOVE'}`).toString('base64');
+    const signalData = {
+        from: username,
+        data: Buffer.from(`REACTION:${messageId}:${reaction || 'REMOVE'}`).toString('base64'),
+        time: Date.now(),
+        groupId: msg.isGroup ? msg.to : null
+    };
 
     if (msg.isGroup) {
-        notifyGroupChange(msg.to, username, "REACTION_GROUP"); // Reutiliza lógica de sinal de grupo
+        notifyGroupChange(msg.to, username, "REACTION_GROUP");
     } else {
+        const target = (msg.from === username ? msg.to : msg.from);
         if (!callSignals[target]) callSignals[target] = [];
-        callSignals[target].push({ from: username, data: signalData, time: Date.now() });
+        callSignals[target].push(signalData);
+
+        if (userSockets[target]) {
+            userSockets[target].forEach(sid => io.to(sid).emit('call_signal', signalData));
+        }
     }
 
     if (db) await db.collection('messages').doc(messageId.toString()).update({ reactions: msg.reactions });
@@ -641,29 +686,38 @@ app.post('/mark_read', async (req, res) => {
 app.post('/call/signal', (req, res) => {
     const { to, from, data } = req.body;
 
+    const signalData = { from, data, time: Date.now() };
+
     // Lógica de Broadcast para Grupos 🛰️ ✅
     if (to.startsWith('group_')) {
         const group = groups.find(g => g.id === to);
         if (group) {
             group.members.forEach(member => {
-                if (member !== from) { // Não envia sinal para o próprio remetente
+                if (member !== from) {
+                    const gSignal = { ...signalData, groupName: group.name, groupId: group.id };
+
+                    // Polling
                     if (!callSignals[member]) callSignals[member] = [];
-                    callSignals[member].push({
-                        from,
-                        data,
-                        time: Date.now(),
-                        groupName: group.name,
-                        groupId: group.id
-                    });
+                    callSignals[member].push(gSignal);
+
+                    // Socket ⚡
+                    if (userSockets[member]) {
+                        userSockets[member].forEach(sid => io.to(sid).emit('call_signal', gSignal));
+                    }
                 }
             });
             return res.json({ status: 'ok', broadcastedCount: group.members.length - 1 });
         }
     }
 
-    // Sinal 1 pra 1 convencional
+    // Sinal 1 pra 1
     if (!callSignals[to]) callSignals[to] = [];
-    callSignals[to].push({ from, data, time: Date.now() });
+    callSignals[to].push(signalData);
+
+    if (userSockets[to]) {
+        userSockets[to].forEach(sid => io.to(sid).emit('call_signal', signalData));
+    }
+
     res.json({ status: 'ok' });
 });
 
@@ -916,6 +970,34 @@ app.get('/', (req, res) => {
 // --- MOTOR ANTI-SONO (KEEP ALIVE) 🚀 ---
 app.get('/ping', (req, res) => res.send('pong'));
 
+// --- SOCKET.IO LOGIC 🛰️ ---
+io.on('connection', (socket) => {
+    let currentAuthUser = null;
+
+    socket.on('auth', (username) => {
+        currentAuthUser = username;
+        if (!userSockets[username]) userSockets[username] = [];
+        if (!userSockets[username].includes(socket.id)) {
+            userSockets[username].push(socket.id);
+        }
+        console.log(`Socket: ${username} conectado (${socket.id})`);
+
+        // Atualiza status online para amigos
+        io.emit('user_online', username);
+    });
+
+    socket.on('disconnect', () => {
+        if (currentAuthUser && userSockets[currentAuthUser]) {
+            userSockets[currentAuthUser] = userSockets[currentAuthUser].filter(id => id !== socket.id);
+            if (userSockets[currentAuthUser].length === 0) {
+                delete userSockets[currentAuthUser];
+                io.emit('user_offline', currentAuthUser);
+            }
+        }
+        console.log(`Socket: Disconectado (${socket.id})`);
+    });
+});
+
 setInterval(() => {
     https.get('https://servidor-mensagens.onrender.com/ping', (res) => {
         console.log('Motor Anti-Sono: Ping efetuado ✅');
@@ -924,4 +1006,4 @@ setInterval(() => {
     });
 }, 10 * 60 * 1000); // 10 minutos
 
-app.listen(port, () => console.log(`Noctis v20.48 pronto.`));
+server.listen(port, () => console.log(`Noctis v20.48 (Socket Mode) pronto.`));
