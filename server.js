@@ -578,6 +578,28 @@ app.post('/mark_read', async (req, res) => {
 
 app.post('/call/signal', (req, res) => {
     const { to, from, data } = req.body;
+
+    // Lógica de Broadcast para Grupos 🛰️ ✅
+    if (to.startsWith('group_')) {
+        const group = groups.find(g => g.id === to);
+        if (group) {
+            group.members.forEach(member => {
+                if (member !== from) { // Não envia sinal para o próprio remetente
+                    if (!callSignals[member]) callSignals[member] = [];
+                    callSignals[member].push({
+                        from,
+                        data,
+                        time: Date.now(),
+                        groupName: group.name,
+                        groupId: group.id
+                    });
+                }
+            });
+            return res.json({ status: 'ok', broadcastedCount: group.members.length - 1 });
+        }
+    }
+
+    // Sinal 1 pra 1 convencional
     if (!callSignals[to]) callSignals[to] = [];
     callSignals[to].push({ from, data, time: Date.now() });
     res.json({ status: 'ok' });
