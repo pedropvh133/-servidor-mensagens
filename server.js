@@ -21,7 +21,8 @@ const app = express();
 const server = http.createServer(app); // Criar servidor HTTP a partir do Express
 const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] },
-    maxHttpBufferSize: 1e8 // 100MB para uploads via socket se necessário
+    allowEIO3: true, // COMPATIBILIDADE: Essencial para o cliente Android v2.x 🛰️ ✅
+    maxHttpBufferSize: 1e8 // 100MB
 });
 const port = process.env.PORT || 3000;
 
