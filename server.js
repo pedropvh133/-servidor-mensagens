@@ -1,6 +1,6 @@
 /**
- * NOCTIS MESSENGER - SERVER MASTER V22.6 (RESCUE + STABLE)
- * ESTABILIZAÇÃO TOTAL + TRATAMENTO DE CRASH 🛡️
+ * NOCTIS MESSENGER - SERVER MASTER V22.8 (FINAL RENDER STABLE)
+ * ESTABILIDADE MÁXIMA 🛡️
  */
 
 const express = require('express');
@@ -11,7 +11,6 @@ const { Server } = require('socket.io');
 const admin = require('firebase-admin');
 const B2 = require('backblaze-b2');
 const multer = require('multer');
-const https = require('https');
 const crypto = require('crypto');
 const fs = require('fs');
 
@@ -19,381 +18,178 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] },
-    allowEIO3: true,
-    maxHttpBufferSize: 1e8
+    allowEIO3: true
 });
 const port = process.env.PORT || 3000;
 
-// --- ESTADO GLOBAL ---
+// --- ESTADO ---
 let users = [];
 let messages = [];
 let groups = [];
-let callSignals = {};
 let userSockets = {};
-let firebaseStatus = "Aguardando... ⚪";
-let b2Status = "Aguardando... ⚪";
-let cachedBucketName = null;
-let b2ConnCache = { authToken: null, uploadUrl: null, uploadAuthToken: null, expiry: 0 };
-let adminPassword = "pedropvh133@gmail.com/admin";
 let latestVersionCode = 1;
 let latestApkName = "";
+let adminPassword = "pedropvh133@gmail.com/admin";
 
-// --- FIREBASE RESILIENTE ---
+// --- FIREBASE ---
 try {
     const rawConfig = process.env.FIREBASE_CONFIG;
     if (rawConfig) {
-        const sanitized = rawConfig.trim().replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
-        const serviceAccount = JSON.parse(sanitized);
-        if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-        firebaseStatus = "ONLINE 🔥";
+        const config = JSON.parse(rawConfig.trim().replace(/[\u0000-\u001F\u007F-\u009F]/g, ""));
+        if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.cert(config) });
     }
-} catch (err) { firebaseStatus = "ERRO CONFIG 🔥"; console.error("Firebase Init Error:", err.message); }
+} catch (e) { console.error("Firebase Init Skip:", e.message); }
 
 const db = (admin.apps.length > 0) ? admin.firestore() : null;
 
-// --- B2 RESILIENTE ---
-const b2 = new B2({ applicationKeyId: process.env.B2_KEY_ID || '', applicationKey: process.env.B2_APP_KEY || '' });
-const B2_BUCKET_ID = process.env.B2_BUCKET_ID;
+// --- B2 ---
+const b2 = new B2({
+    applicationKeyId: process.env.B2_KEY_ID || '',
+    applicationKey: process.env.B2_APP_KEY || ''
+});
 
-async function initB2() {
-    if (!process.env.B2_KEY_ID || !B2_BUCKET_ID) return;
-    try {
-        await b2.authorize();
-        const bucketResp = await b2.getBucket({ bucketId: B2_BUCKET_ID });
-        if (bucketResp.data.buckets && bucketResp.data.buckets.length > 0) {
-            cachedBucketName = bucketResp.data.buckets[0].bucketName;
-            b2Status = "CONECTADO ☁️";
-        }
-    } catch (e) { b2Status = "OFFLINE ❌"; console.error("B2 Init Error:", e.message); }
-}
-initB2();
-
-// --- CARGA DE DADOS ---
-async function loadDataFromBackup() {
+// --- SYNC ---
+async function loadData() {
     if (!db) return;
     try {
-        const userSnap = await db.collection('users').get();
-        users = userSnap.docs.map(d => {
-            const data = d.data();
-            if (!data.blockedUsers) data.blockedUsers = []; // Garante que a lista existe 🛡️
-            return data;
-        });
-        const groupSnap = await db.collection('groups').get();
-        groups = groupSnap.docs.map(d => d.data());
-        const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(2000).get();
-        messages = msgSnap.docs.map(d => d.data()).reverse();
-        const configDoc = await db.collection('system').doc('config').get();
-        if (configDoc.exists) {
-            latestVersionCode = configDoc.data().versionCode || 1;
-            latestApkName = configDoc.data().apkName || "";
-            if (configDoc.data().adminPassword) adminPassword = configDoc.data().adminPassword;
+        const uSnap = await db.collection('users').get();
+        users = uSnap.docs.map(d => ({ blockedUsers: [], ...d.data() }));
+        const gSnap = await db.collection('groups').get();
+        groups = gSnap.docs.map(d => d.data());
+        const mSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(500).get();
+        messages = mSnap.docs.map(d => d.data()).reverse();
+        const cfg = await db.collection('system').doc('config').get();
+        if (cfg.exists) {
+            latestVersionCode = cfg.data().versionCode || 1;
+            latestApkName = cfg.data().apkName || "";
+            if (cfg.data().adminPassword) adminPassword = cfg.data().adminPassword;
         }
-    } catch (e) { console.error("Backup Error:", e.message); }
+    } catch (e) { console.error("Data Sync Error:", e.message); }
 }
-loadDataFromBackup();
+loadData();
 
-// --- FUNÇÕES DE APOIO ---
-function getFileSHA1(filePath) {
-    return new Promise((resolve, reject) => {
-        const hash = crypto.createHash('sha1');
-        const stream = fs.createReadStream(filePath);
-        stream.on('data', (data) => hash.update(data));
-        stream.on('end', () => resolve(hash.digest('hex')));
-        stream.on('error', (err) => reject(err));
-    });
-}
-
-async function getB2UploadParams() {
-    const now = Date.now();
-    if (b2ConnCache.authToken && b2ConnCache.uploadUrl && now < b2ConnCache.expiry) {
-        return { uploadUrl: b2ConnCache.uploadUrl, uploadAuthToken: b2ConnCache.uploadAuthToken };
-    }
-    await b2.authorize();
-    const resp = await b2.getUploadUrl({ bucketId: B2_BUCKET_ID });
-    b2ConnCache = { authToken: b2.authorizationToken, uploadUrl: resp.data.uploadUrl, uploadAuthToken: resp.data.authorizationToken, expiry: now + (2 * 60 * 60 * 1000) };
-    return { uploadUrl: b2ConnCache.uploadUrl, uploadAuthToken: b2ConnCache.uploadAuthToken };
-}
-
-async function uploadToB2(dataOrPath, fileName, isFilePath = false, retry = true) {
-    if (!B2_BUCKET_ID) return { error: "B2_BUCKET_ID ausente." };
+// --- B2 UPLOAD ---
+async function uploadToB2(data, name, isPath = false) {
     try {
-        const { uploadUrl, uploadAuthToken } = await getB2UploadParams();
-        let params = { uploadUrl, uploadAuthToken, fileName };
-        if (isFilePath) {
-            params.contentLength = fs.statSync(dataOrPath).size;
-            params.contentSha1 = await getFileSHA1(dataOrPath);
-            params.data = fs.createReadStream(dataOrPath);
-        } else { params.data = dataOrPath; }
-        const resp = await b2.uploadFile(params);
-        return { url: `B2_URL:${resp.data.fileName}` };
-    } catch (e) {
-        if (retry) { b2ConnCache.expiry = 0; return uploadToB2(dataOrPath, fileName, isFilePath, false); }
-        return { error: e.message };
-    }
+        await b2.authorize();
+        const resp = await b2.getUploadUrl({ bucketId: process.env.B2_BUCKET_ID });
+        const upParams = {
+            uploadUrl: resp.data.uploadUrl,
+            uploadAuthToken: resp.data.authorizationToken,
+            fileName: name
+        };
+        if (isPath) {
+            upParams.data = fs.createReadStream(data);
+            upParams.contentLength = fs.statSync(data).size;
+        } else {
+            upParams.data = data;
+        }
+        const r = await b2.uploadFile(upParams);
+        return { url: `B2_URL:${r.data.fileName}` };
+    } catch (e) { return { error: e.message }; }
 }
 
 app.use(cors());
-app.use(bodyParser.json({ limit: '100mb' }));
+app.use(bodyParser.json({ limit: '50mb' }));
 
-// --- ROTAS ADMIN ---
+// --- ADMIN ---
 app.post('/admin/upload_apk', multer({ dest: '/tmp/' }).single('a'), async (req, res) => {
     const { v, p } = req.body;
     if (p !== adminPassword) return res.status(403).send('Negado');
     if (!req.file) return res.status(400).send('Sem arquivo');
-    try {
-        const fileName = `n_v${v}_${Date.now()}.apk`;
-        const result = await uploadToB2(req.file.path, fileName, true);
-        if (result.url) {
-            latestVersionCode = parseInt(v); latestApkName = fileName;
-            if (db) await db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName, adminPassword }, { merge: true });
-            if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-            res.json({ status: 'ok' });
-        } else res.status(500).send(result.error);
-    } catch (e) { res.status(500).send(e.message); }
-});
-
-app.post('/admin/update_version', async (req, res) => {
-    const { versionCode, password } = req.body;
-    if (password !== adminPassword) return res.status(403).send('Negado');
-    latestVersionCode = parseInt(versionCode);
-    if (db) await db.collection('system').doc('config').update({ versionCode: latestVersionCode });
-    res.json({ status: 'ok' });
-});
-
-app.post('/admin/change_password', async (req, res) => {
-    const { oldPassword, newPassword } = req.body;
-    if (oldPassword !== adminPassword) return res.status(403).send('Negado');
-    adminPassword = newPassword;
-    if (db) await db.collection('system').doc('config').update({ adminPassword });
-    res.json({ status: 'ok' });
-});
-
-// --- ROTAS USUÁRIO ---
-app.post('/register', async (req, res) => {
-    const { username, password } = req.body;
-    if (users.find(u => u.username === username)) return res.status(400).send('Existe');
-    const u = { username, password, bio: 'Olá!', profilePic: null, lastSeen: Date.now(), blockedUsers: [] };
-    users.push(u); res.status(201).json({ status: 'ok' });
-    if (db) await db.collection('users').doc(username).set(u);
-});
-
-app.post('/login', async (req, res) => {
-    const { username, password } = req.body;
-    const u = users.find(x => x.username === username);
-    if (u && u.password === password) {
-        u.lastSeen = Date.now(); res.json({ status: 'ok', ...u });
-        if (db) await db.collection('users').doc(username).update({ lastSeen: Date.now() });
-    } else res.status(401).send('Erro');
-});
-
-app.post('/user/update_pic', async (req, res) => {
-    const { username, profilePic } = req.body;
-    const r = await uploadToB2(Buffer.from(profilePic, 'base64'), `p_${Date.now()}`);
+    const name = `up_v${v}_${Date.now()}.apk`;
+    const r = await uploadToB2(req.file.path, name, true);
     if (r.url) {
-        const u = users.find(x => x.username === username);
-        if (u) { u.profilePic = r.url; if (db) await db.collection('users').doc(username).update({ profilePic: r.url }); }
-        res.json({ status: 'ok', profilePic: r.url });
+        latestVersionCode = parseInt(v); latestApkName = name;
+        if (db) await db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: name, adminPassword }, { merge: true });
+        fs.unlinkSync(req.file.path);
+        res.send('ok');
     } else res.status(500).send(r.error);
 });
 
-app.get('/user/info/:username', (req, res) => {
-    const u = users.find(x => x.username === req.params.username);
-    if (u) { const { password, ...safe } = u; res.json(safe); } else res.status(404).send('Off');
+app.post('/admin/update_version', async (req, res) => {
+    if (req.body.password !== adminPassword) return res.status(403).send('Erro');
+    latestVersionCode = parseInt(req.body.versionCode);
+    if (db) await db.collection('system').doc('config').update({ versionCode: latestVersionCode });
+    res.send('ok');
 });
 
-app.get('/conversations/list/:username', (req, res) => {
-    const me = req.params.username; const set = new Set();
-    messages.forEach(m => { if (!m.isGroup) { if (m.from === me) set.add(m.to); if (m.to === me) set.add(m.from); } });
-    res.json(users.filter(u => set.has(u.username)).map(u => { const { password, ...s } = u; return s; }));
+// --- CORE ---
+app.post('/login', (req, res) => {
+    const u = users.find(x => x.username === req.body.username && x.password === req.body.password);
+    if (u) { u.lastSeen = Date.now(); res.json({ status: 'ok', ...u }); }
+    else res.status(401).send('Erro');
 });
 
-app.get('/status/:username', (req, res) => {
-    const u = users.find(x => x.username === req.params.username);
-    res.json({ status: (u && (Date.now() - u.lastSeen) < 60000) ? "Online" : "Visto recentemente" });
+app.post('/register', async (req, res) => {
+    if (users.find(x => x.username === req.body.username)) return res.status(400).send('Existe');
+    const u = { username: req.body.username, password: req.body.password, bio: 'Olá!', profilePic: null, lastSeen: Date.now(), blockedUsers: [] };
+    users.push(u); if (db) await db.collection('users').doc(u.username).set(u);
+    res.status(201).json({ status: 'ok' });
 });
 
-app.post('/user/update_settings', async (req, res) => {
-    const { username, currentPassword, newUsername, newPassword, bio } = req.body;
-    const u = users.find(x => x.username === username && x.password === currentPassword);
-    if (u) {
-        if (newUsername) u.username = newUsername; if (newPassword) u.password = newPassword; if (bio) u.bio = bio;
-        res.json({ status: 'ok', ...u }); if (db) await db.collection('users').doc(username).set(u);
-    } else res.status(401).send('Erro');
-});
-
-app.post('/user/block', async (req, res) => {
-    const { username, target } = req.body;
-    const u = users.find(x => x.username === username);
-    if (u) {
-        if (!u.blockedUsers) u.blockedUsers = [];
-        if (!u.blockedUsers.includes(target)) u.blockedUsers.push(target);
-        res.json({ status: 'ok' }); if (db) await db.collection('users').doc(username).update({ blockedUsers: u.blockedUsers });
-    } else res.status(404).send('Erro');
-});
-
-app.post('/user/unblock', async (req, res) => {
-    const { username, target } = req.body;
-    const u = users.find(x => x.username === username);
-    if (u && u.blockedUsers) { u.blockedUsers = u.blockedUsers.filter(b => b !== target); res.json({ status: 'ok' }); if (db) await db.collection('users').doc(username).update({ blockedUsers: u.blockedUsers }); }
-    else res.status(404).send('Erro');
-});
-
-app.get('/user/blocked_list/:username', (req, res) => res.json(users.find(u => u.username === req.params.username)?.blockedUsers || []));
-
-// --- GRUPOS ---
-app.post('/create_group', async (req, res) => {
-    const { name, creator, description, rules } = req.body;
-    const id = 'group_' + Date.now();
-    const g = { id, name, creator, members: [creator], admins: [creator], profilePic: null, description: description || "", rules: rules || "" };
-    groups.push(g); res.status(201).json(g);
-    if (db) await db.collection('groups').doc(id).set(g);
-});
-
-app.get('/groups/:username', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.username))));
-
-app.post(['/group/update_name', '/group/update_settings'], async (req, res) => {
-    const { groupId, adminUser, name, description, rules } = req.body;
-    const g = groups.find(x => x.id === groupId && x.admins.includes(adminUser));
-    if (g) {
-        if (name) g.name = name; if (description !== undefined) g.description = description; if (rules !== undefined) g.rules = rules;
-        res.json(g); if (db) await db.collection('groups').doc(groupId).update({ name: g.name, description: g.description, rules: g.rules });
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/leave', async (req, res) => {
-    const { groupId, adminUser } = req.body;
-    const g = groups.find(x => x.id === groupId && x.members.includes(adminUser));
-    if (g) {
-        g.members = g.members.filter(m => m !== adminUser); g.admins = g.admins.filter(a => a !== adminUser);
-        if (g.members.length === 0) { groups = groups.filter(x => x.id !== groupId); if (db) await db.collection('groups').doc(groupId).delete(); return res.json({ status: 'ok', deleted: true }); }
-        if (g.admins.length === 0 && g.members.length > 0) g.admins.push(g.members[0]);
-        if (db) await db.collection('groups').doc(groupId).update({ members: g.members, admins: g.admins });
-        res.json({ status: 'ok' });
-    } else res.status(404).send('Off');
-});
-
-// --- MENSAGENS ---
 app.post('/send_message', async (req, res) => {
-    const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup, unlockTimestamp, replyToId, replyText, replySender } = req.body;
-    const target = isGroup ? groups.find(g => g.id === recipient) : users.find(u => u.username === recipient);
-    if (!isGroup && target?.blockedUsers?.includes(username)) return res.json({ status: 'ok' });
-
-    let final = content;
-    if (isAudio || isImage || isVideo) {
-        const r = await uploadToB2(Buffer.from(content, 'base64'), `m_${Date.now()}`);
-        if (r.url) final = r.url; else return res.status(500).send(r.error);
+    const d = req.body; let content = d.content;
+    if (d.isAudio || d.isImage || d.isVideo) {
+        const r = await uploadToB2(Buffer.from(d.content, 'base64'), `media_${Date.now()}`);
+        if (r.url) content = r.url; else return res.status(500).send(r.error);
     }
-
-    const m = { id: Date.now(), from: username, to: recipient, content: final, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false, delivered: false, unlockTimestamp, replyToId, replyText, replySender, reactions: {} };
+    const m = { id: Date.now(), ...d, content, timestamp: Date.now(), read: false, delivered: false, reactions: {} };
     messages.push(m); res.json({ status: 'ok' });
-
-    if (isGroup) {
-        const g = groups.find(x => x.id === recipient);
-        g?.members.forEach(mm => { if (mm !== username && userSockets[mm]) userSockets[mm].forEach(s => io.to(s).emit('new_message', { ...m, groupName: g.name })); });
-    } else {
-        userSockets[recipient]?.forEach(s => io.to(s).emit('new_message', m));
-    }
+    if (d.isGroup) {
+        const g = groups.find(x => x.id === d.recipient);
+        g?.members.forEach(u => { if (u !== d.username) userSockets[u]?.forEach(s => io.to(s).emit('new_message', { ...m, groupName: g.name })); });
+    } else { userSockets[d.recipient]?.forEach(s => io.to(s).emit('new_message', m)); }
     if (db) await db.collection('messages').doc(m.id.toString()).set(m);
 });
 
-app.get('/conversation/:u1/:u2', async (req, res) => {
-    const list = messages.filter(m => !m.isGroup && ((m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1)));
-    for (let m of list) { if (m.from === req.params.u2 && !m.delivered) { m.delivered = true; if (db) await db.collection('messages').doc(m.id.toString()).update({ delivered: true }); } }
-    res.json(list);
+app.get('/conversation/:u1/:u2', (req, res) => {
+    res.json(messages.filter(m => !m.isGroup && ((m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1))));
 });
 
-app.get('/messages/unread/:username', (req, res) => {
-    const me = req.params.username;
-    const resList = messages.filter(m => ((!m.isGroup && m.to === me) || (m.isGroup && groups.find(g => g.id === m.to && g.members.includes(me)) && m.from !== me)) && !m.read);
-    res.json(resList);
+app.get('/messages/unread/:u', (req, res) => {
+    res.json(messages.filter(m => !m.read && ((!m.isGroup && m.to === req.params.u) || (m.isGroup && groups.find(g => g.id === m.to && g.members.includes(req.params.u)) && m.from !== req.params.u))));
 });
 
-app.post('/mark_read', async (req, res) => {
-    const { username, contact } = req.body;
-    messages.forEach(m => { if (!m.isGroup && m.from === contact && m.to === username && !m.read) { m.read = true; if (db) await db.collection('messages').doc(m.id.toString()).update({ read: true }); } });
-    res.json({ status: 'ok' });
+app.get('/groups/:u', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.u))));
+app.get('/user/info/:u', (req, res) => res.json(users.find(u => u.username === req.params.u) || {}));
+app.get('/status/:u', (req, res) => {
+    const u = users.find(x => x.username === req.params.u);
+    res.json({ status: (u && (Date.now() - u.lastSeen) < 60000) ? "Online" : "Visto recentemente" });
 });
 
-app.post('/call/signal', (req, res) => {
-    const { to, from, data } = req.body;
-    const sig = { from, data, time: Date.now() };
-    if (to.startsWith('group_')) {
-        groups.find(x => x.id === to)?.members.forEach(mm => { if (mm !== from && userSockets[mm]) userSockets[mm].forEach(s => io.to(s).emit('call_signal', sig)); });
-    } else { userSockets[to]?.forEach(s => io.to(s).emit('call_signal', sig)); }
-    res.json({ status: 'ok' });
+app.get('/conversations/list/:u', (req, res) => {
+    const me = req.params.u; const set = new Set();
+    messages.forEach(m => { if(!m.isGroup){ if(m.from===me) set.add(m.to); if(m.to===me) set.add(m.from); }});
+    res.json(users.filter(u => set.has(u.username)).map(u => { const {password, ...s} = u; return s; }));
 });
 
-app.get('/call/check/:username', (req, res) => {
-    res.setHeader('X-Latest-Version', latestVersionCode.toString());
-    res.setHeader('X-Apk-Name', latestApkName || "");
-    res.json([]);
-});
-
-// --- PAINEL MASTER ---
+// --- UI ---
 app.get('/admin', (req, res) => {
-    const total = users.length;
-    const online = users.filter(u => (Date.now() - (u.lastSeen || 0)) < 60000).length;
-    res.send(`
-        <!DOCTYPE html><html><head><meta charset="UTF-8"><title>NOCTIS MASTER</title>
-        <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;900&family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
-        <style>
-            :root { --neon: #00D2FF; --bg: #05070A; }
-            body { background: var(--bg); color: #FFF; font-family: 'Rajdhani', sans-serif; margin:0; display:flex; justify-content:center; min-height:100vh; padding:20px; }
-            body::before { content:""; position:fixed; inset:0; background:linear-gradient(rgba(18,16,16,0) 50%, rgba(0,0,0,0.1) 50%), linear-gradient(90deg, rgba(255,0,0,0.02), rgba(0,255,0,0.01), rgba(0,0,255,0.02)); background-size:100% 4px, 4px 100%; pointer-events:none; }
-            .card { background:#0A0F1E; padding:40px; border-radius:40px; border:1px solid rgba(0,210,255,0.3); box-shadow:0 25px 60px #000; width:100%; max-width:550px; }
-            h1 { font-family:'Orbitron'; color:var(--neon); text-align:center; letter-spacing:5px; text-shadow:0 0 15px var(--neon); }
-            .stats { display:grid; grid-template-columns:1fr 1fr; gap:15px; margin:30px 0; }
-            .stat { background:#111827; padding:20px; border-radius:25px; text-align:center; border:1px solid rgba(255,255,255,0.05); }
-            .stat b { font-size:30px; color:var(--neon); display:block; font-family:'Orbitron'; }
-            input { width:100%; background:#020617; border:2px solid #1E293B; color:white; padding:18px; border-radius:18px; outline:none; margin-bottom:20px; }
-            .btn { width:100%; background:linear-gradient(90deg, var(--neon), #0072FF); color:black; border:none; padding:22px; border-radius:20px; font-weight:900; cursor:pointer; text-transform:uppercase; font-family:'Orbitron'; }
-            .progress { display:none; margin-top:30px; }
-            .bar { width:100%; background:#111; height:12px; border-radius:6px; overflow:hidden; }
-            .fill { width:0%; height:100%; background:linear-gradient(90deg, var(--neon), #FF00FF); transition:0.3s; }
-        </style></head>
-        <body><div class="card">
-            <h1>🛰️ MASTER</h1>
-            <div class="stats"><div class="stat"><b>${total}</b> Usuários</div><div class="stat"><b>${online}</b> Online</div></div>
-            <div style="font-size:12px; margin-bottom:20px; color:var(--neon)">FIREBASE: ${firebaseStatus} | VAULT: ${b2Status}</div>
-            <form id="f">
-                <input name="v" type="number" value="${latestVersionCode+1}">
-                <input name="a" type="file" accept=".apk">
-                <input name="p" type="password" placeholder="SENHA MASTER">
-                <button type="submit" class="btn">INJECT DEPLOYMENT 🚀</button>
-            </form>
-            <div class="progress" id="pb"><div class="bar"><div class="fill" id="fill"></div></div><p id="ps" style="font-size:11px; text-align:center; color:var(--neon); margin-top:10px"></p></div>
-            <p id="m" style="text-align:center; margin-top:25px; font-weight:700"></p>
-        </div>
-        <script>
-            document.getElementById('f').onsubmit = async (e) => {
-                e.preventDefault(); const fd = new FormData(e.target);
-                const m = document.getElementById('m'); const pb = document.getElementById('pb'); const fill = document.getElementById('fill'); const ps = document.getElementById('ps');
-                m.innerText = "📡 Estabelecendo Uplink...";
-                if (fd.get('a').size > 0) {
-                    pb.style.display="block"; const xhr = new XMLHttpRequest(); xhr.open('POST', '/admin/upload_apk', true);
-                    xhr.upload.onprogress = (ev) => { const p = Math.round((ev.loaded/ev.total)*100); fill.style.width = p+"%"; ps.innerText = p + "% - Transmitindo..."; };
-                    xhr.onload = () => { if(xhr.status===200){ m.style.color="#00F260"; m.innerText="✨ SUCESSO!"; setTimeout(()=>location.reload(), 2000); } else { m.style.color="#FF4B2B"; m.innerText="❌ FALHA: " + xhr.responseText; pb.style.display="none"; } };
-                    xhr.send(fd);
-                } else {
-                    const r = await fetch('/admin/update_version', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({versionCode: fd.get('v'), password: fd.get('p')}) });
-                    m.innerText = r.ok ? "✅ VERSÃO OK" : "❌ ERRO";
-                }
-            };
-        </script></body></html>
-    `);
+    res.send(`<!DOCTYPE html><html><head><title>MASTER</title><style>body{background:#05070A;color:#00D2FF;font-family:sans-serif;display:flex;justify-content:center;padding:50px;} .card{background:#0A0F1E;padding:40px;border-radius:20px;border:1px solid #00D2FF;width:100%;max-width:400px;} input{width:100%;margin-bottom:15px;padding:15px;background:#000;border:1px solid #00D2FF;color:#FFF;} .btn{width:100%;padding:15px;background:#00D2FF;color:#000;font-weight:bold;cursor:pointer;}</style></head>
+    <body><div class="card"><h1>🛰️ MASTER</h1><p>Usuários: ${users.length}</p><form id="f"><input name="v" type="number" value="${latestVersionCode+1}"><input name="a" type="file"><input name="p" type="password" placeholder="KEY"><button type="submit" class="btn">DEPLOY APK</button></form><p id="m"></p></div>
+    <script>document.getElementById('f').onsubmit=async(e)=>{e.preventDefault();const fd=new FormData(e.target);const m=document.getElementById('m');m.innerText="Trabalhando...";if(fd.get('a').size>0){const xhr=new XMLHttpRequest();xhr.open('POST','/admin/upload_apk',true);xhr.onload=()=>{if(xhr.status===200){alert('OK!');location.reload();}else{m.innerText="ERRO: "+xhr.responseText;}};xhr.send(fd);}else{const r=await fetch('/admin/update_version',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({versionCode:fd.get('v'),password:fd.get('p')})});m.innerText=r.ok?"Versão OK":"Erro";}};</script></body></html>`);
 });
 
-app.get('/', (req, res) => res.send(`<h1>🛰️ NOCTIS MASTER ONLINE ✅</h1>`));
-app.get('/ping', (req, res) => res.send('pong'));
+app.get('/download', (req, res) => {
+    res.send(`<!DOCTYPE html><html><body style="background:#05070A;color:#00D2FF;display:flex;align-items:center;justify-content:center;height:100vh;"><div><h1>🛰️ NOCTIS</h1><a href="/b2file/${latestApkName}" style="color:#FFF">DOWNLOAD APK v${latestVersionCode}</a></div></body></html>`);
+});
 
+app.get('/b2file/:f', async (req, res) => {
+    try {
+        await b2.authorize();
+        const r = await b2.downloadFileByName({ bucketName: process.env.B2_BUCKET_NAME || 'usermessageapp', fileName: req.params.f, responseType: 'arraybuffer' });
+        res.send(Buffer.from(r.data));
+    } catch (e) { res.status(404).send('Off'); }
+});
+
+app.get('/', (req, res) => res.send('NOCTIS ONLINE'));
+
+// --- SOCKET ---
 io.on('connection', (s) => {
-    let user = null;
-    s.on('auth', (u) => { user = u; if (!userSockets[u]) userSockets[u] = []; userSockets[u].push(s.id); io.emit('user_online', u); });
-    s.on('disconnect', () => { if (user && userSockets[user]) { userSockets[user] = userSockets[user].filter(id => id !== s.id); if (!userSockets[user].length) delete userSockets[user]; } });
+    let u = null;
+    s.on('auth', (id) => { u = id; if (!userSockets[u]) userSockets[u] = []; userSockets[u].push(s.id); io.emit('user_online', u); });
+    s.on('disconnect', () => { if (u && userSockets[u]) { userSockets[u] = userSockets[u].filter(x => x !== s.id); if (userSockets[u].length === 0) delete userSockets[u]; } });
 });
 
-setInterval(() => {
-    https.get('https://servidor-mensagens.onrender.com/ping', () => {}).on('error', () => {});
-}, 10 * 60 * 1000);
-
-server.listen(port, () => console.log(`Master V22.6 Online.`));
+server.listen(port, () => console.log('Live.'));
