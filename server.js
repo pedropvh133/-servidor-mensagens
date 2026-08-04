@@ -129,17 +129,48 @@ app.post('/register', async (req, res) => {
 });
 
 app.post('/send_message', async (req, res) => {
-    const d = req.body; let content = d.content;
+    const d = req.body;
+    let finalContent = d.content;
     if (d.isAudio || d.isImage || d.isVideo) {
         const r = await uploadToB2(Buffer.from(d.content, 'base64'), `media_${Date.now()}`);
-        if (r.url) content = r.url; else return res.status(500).send(r.error);
+        if (r.url) finalContent = r.url; else return res.status(500).send(r.error);
     }
-    const m = { id: Date.now(), ...d, content, timestamp: Date.now(), read: false, delivered: false, reactions: {} };
-    messages.push(m); res.json({ status: 'ok' });
+
+    // MAPEAMENTO CORRETO: Traduz nomes do Request para o Banco de Dados 🛰️ ✅
+    const m = {
+        id: Date.now(),
+        from: d.username,
+        to: d.recipient,
+        content: finalContent,
+        isAudio: d.isAudio || false,
+        isImage: d.isImage || false,
+        isVideo: d.isVideo || false,
+        viewOnce: d.viewOnce || false,
+        isGroup: d.isGroup || false,
+        timestamp: Date.now(),
+        read: false,
+        delivered: false,
+        unlockTimestamp: d.unlockTimestamp || null,
+        replyToId: d.replyToId || null,
+        replyText: d.replyText || null,
+        replySender: d.replySender || null,
+        reactions: {}
+    };
+
+    messages.push(m);
+    res.json({ status: 'ok' });
+
     if (d.isGroup) {
         const g = groups.find(x => x.id === d.recipient);
-        g?.members.forEach(u => { if (u !== d.username) userSockets[u]?.forEach(s => io.to(s).emit('new_message', { ...m, groupName: g.name })); });
-    } else { userSockets[d.recipient]?.forEach(s => io.to(s).emit('new_message', m)); }
+        g?.members.forEach(u => {
+            if (u !== d.username) {
+                userSockets[u]?.forEach(s => io.to(s).emit('new_message', { ...m, groupName: g.name }));
+            }
+        });
+    } else {
+        userSockets[d.recipient]?.forEach(s => io.to(s).emit('new_message', m));
+    }
+
     if (db) await db.collection('messages').doc(m.id.toString()).set(m);
 });
 
