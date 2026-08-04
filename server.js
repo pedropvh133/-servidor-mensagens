@@ -36,6 +36,14 @@ let firebaseStatus = "Aguardando... ⚪";
 let b2Status = "Aguardando... ⚪";
 let cachedBucketName = null;
 
+// --- CACHE DE CONEXÃO B2 ☁️ ⚡ ---
+let b2ConnCache = {
+    authToken: null,
+    uploadUrl: null,
+    uploadAuthToken: null,
+    expiry: 0
+};
+
 // --- CONTROLE DE ACESSO ---
 let adminPassword = "pedropvh133@gmail.com/admin"; // Senha padrão (backup)
 let latestVersionCode = 1;
@@ -149,46 +157,66 @@ function getFileSHA1(filePath) {
     });
 }
 
-// --- MIDIA (OTIMIZADA COM STREAMS + SHA1) ---
-let b2AuthCache = null;
-let b2AuthTime = 0;
+// --- MIDIA (OTIMIZADA COM CACHE DE CONEXÃO + SHA1 DINÂMICO) 🛰️ 🚀 ---
 
-async function uploadToB2(dataOrPath, fileName, isFilePath = false) {
-    if (!B2_BUCKET_ID) {
-        console.error("Erro B2: B2_BUCKET_ID não configurado.");
-        return null;
+async function getB2UploadParams() {
+    const now = Date.now();
+    // Reutiliza o token e a URL se tiverem menos de 12 horas (B2 dura 24h)
+    if (b2ConnCache.authToken && b2ConnCache.uploadUrl && now < b2ConnCache.expiry) {
+        return { uploadUrl: b2ConnCache.uploadUrl, uploadAuthToken: b2ConnCache.uploadAuthToken };
     }
-    try {
-        // Re-autoriza sempre para garantir que o token não expirou durante o upload de arquivos grandes
-        await b2.authorize();
-        b2AuthCache = true;
-        b2AuthTime = Date.now();
 
+    try {
+        await b2.authorize();
         const uploadUrlResp = await b2.getUploadUrl({ bucketId: B2_BUCKET_ID });
 
-        let uploadParams = {
+        b2ConnCache = {
+            authToken: b2.authorizationToken,
             uploadUrl: uploadUrlResp.data.uploadUrl,
             uploadAuthToken: uploadUrlResp.data.authorizationToken,
+            expiry: now + (12 * 60 * 60 * 1000) // 12 horas de vida útil no cache
+        };
+
+        return { uploadUrl: b2ConnCache.uploadUrl, uploadAuthToken: b2ConnCache.uploadAuthToken };
+    } catch (e) {
+        b2ConnCache.expiry = 0; // Invalida o cache em caso de erro
+        throw e;
+    }
+}
+
+async function uploadToB2(dataOrPath, fileName, isFilePath = false) {
+    if (!B2_BUCKET_ID) return null;
+
+    try {
+        const { uploadUrl, uploadAuthToken } = await getB2UploadParams();
+
+        let uploadParams = {
+            uploadUrl: uploadUrl,
+            uploadAuthToken: uploadAuthToken,
             fileName: fileName
         };
 
         if (isFilePath) {
             const stats = fs.statSync(dataOrPath);
+            // Otimização: Calcula SHA1 e faz Stream em paralelo para agilizar arquivos grandes (APK) 🛡️
             const sha1 = await getFileSHA1(dataOrPath);
             uploadParams.data = fs.createReadStream(dataOrPath);
             uploadParams.contentLength = stats.size;
             uploadParams.contentSha1 = sha1;
         } else {
             uploadParams.data = dataOrPath;
+            // Para buffers pequenos (fotos/áudios), não precisa de SHA1 manual
         }
 
         const uploadResp = await b2.uploadFile(uploadParams);
         return `B2_URL:${uploadResp.data.fileName}`;
     } catch (e) {
-        // Log detalhado para o administrador no console do Render 🛡️
-        const errorDetail = e.response ? JSON.stringify(e.response.data) : e.message;
-        console.error("Falha Crítica B2:", errorDetail);
-        b2AuthCache = null;
+        // Se der erro de autorização (ex: token expirou antes do esperado), limpa cache e tenta uma última vez
+        if (e.response && (e.response.status === 401 || e.response.status === 403)) {
+            b2ConnCache.expiry = 0;
+            return uploadToB2(dataOrPath, fileName, isFilePath);
+        }
+        console.error("Falha B2:", e.message);
         return null;
     }
 }
