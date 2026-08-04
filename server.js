@@ -20,7 +20,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] },
     allowEIO3: true,
-    maxHttpBufferSize: 1e8 
+    maxHttpBufferSize: 1e8
 });
 const port = process.env.PORT || 3000;
 
@@ -215,7 +215,7 @@ app.get('/status/:username', (req, res) => {
 app.post('/user/update_settings', async (req, res) => {
     const { username, currentPassword, newUsername, newPassword, bio } = req.body;
     const u = users.find(x => x.username === username && x.password === currentPassword);
-    if (u) { 
+    if (u) {
         if (newUsername) u.username = newUsername; if (newPassword) u.password = newPassword; if (bio) u.bio = bio;
         res.json({ status: 'ok', ...u }); if (db) await db.collection('users').doc(username).set(u);
     } else res.status(401).send('Erro');
@@ -224,10 +224,10 @@ app.post('/user/update_settings', async (req, res) => {
 app.post('/user/block', async (req, res) => {
     const { username, target } = req.body;
     const u = users.find(x => x.username === username);
-    if (u) { 
+    if (u) {
         if (!u.blockedUsers) u.blockedUsers = [];
-        if (!u.blockedUsers.includes(target)) u.blockedUsers.push(target); 
-        res.json({ status: 'ok' }); if (db) await db.collection('users').doc(username).update({ blockedUsers: u.blockedUsers }); 
+        if (!u.blockedUsers.includes(target)) u.blockedUsers.push(target);
+        res.json({ status: 'ok' }); if (db) await db.collection('users').doc(username).update({ blockedUsers: u.blockedUsers });
     } else res.status(404).send('Erro');
 });
 
@@ -335,4 +335,65 @@ app.get('/admin', (req, res) => {
     const online = users.filter(u => (Date.now() - (u.lastSeen || 0)) < 60000).length;
     res.send(`
         <!DOCTYPE html><html><head><meta charset="UTF-8"><title>NOCTIS MASTER</title>
-        <
+        <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;900&family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
+        <style>
+            :root { --neon: #00D2FF; --bg: #05070A; }
+            body { background: var(--bg); color: #FFF; font-family: 'Rajdhani', sans-serif; margin:0; display:flex; justify-content:center; min-height:100vh; padding:20px; }
+            body::before { content:""; position:fixed; inset:0; background:linear-gradient(rgba(18,16,16,0) 50%, rgba(0,0,0,0.1) 50%), linear-gradient(90deg, rgba(255,0,0,0.02), rgba(0,255,0,0.01), rgba(0,0,255,0.02)); background-size:100% 4px, 4px 100%; pointer-events:none; }
+            .card { background:#0A0F1E; padding:40px; border-radius:40px; border:1px solid rgba(0,210,255,0.3); box-shadow:0 25px 60px #000; width:100%; max-width:550px; }
+            h1 { font-family:'Orbitron'; color:var(--neon); text-align:center; letter-spacing:5px; text-shadow:0 0 15px var(--neon); }
+            .stats { display:grid; grid-template-columns:1fr 1fr; gap:15px; margin:30px 0; }
+            .stat { background:#111827; padding:20px; border-radius:25px; text-align:center; border:1px solid rgba(255,255,255,0.05); }
+            .stat b { font-size:30px; color:var(--neon); display:block; font-family:'Orbitron'; }
+            input { width:100%; background:#020617; border:2px solid #1E293B; color:white; padding:18px; border-radius:18px; outline:none; margin-bottom:20px; }
+            .btn { width:100%; background:linear-gradient(90deg, var(--neon), #0072FF); color:black; border:none; padding:22px; border-radius:20px; font-weight:900; cursor:pointer; text-transform:uppercase; font-family:'Orbitron'; }
+            .progress { display:none; margin-top:30px; }
+            .bar { width:100%; background:#111; height:12px; border-radius:6px; overflow:hidden; }
+            .fill { width:0%; height:100%; background:linear-gradient(90deg, var(--neon), #FF00FF); transition:0.3s; }
+        </style></head>
+        <body><div class="card">
+            <h1>🛰️ MASTER</h1>
+            <div class="stats"><div class="stat"><b>${total}</b> Usuários</div><div class="stat"><b>${online}</b> Online</div></div>
+            <div style="font-size:12px; margin-bottom:20px; color:var(--neon)">FIREBASE: ${firebaseStatus} | VAULT: ${b2Status}</div>
+            <form id="f">
+                <input name="v" type="number" value="${latestVersionCode+1}">
+                <input name="a" type="file" accept=".apk">
+                <input name="p" type="password" placeholder="SENHA MASTER">
+                <button type="submit" class="btn">INJECT DEPLOYMENT 🚀</button>
+            </form>
+            <div class="progress" id="pb"><div class="bar"><div class="fill" id="fill"></div></div><p id="ps" style="font-size:11px; text-align:center; color:var(--neon); margin-top:10px"></p></div>
+            <p id="m" style="text-align:center; margin-top:25px; font-weight:700"></p>
+        </div>
+        <script>
+            document.getElementById('f').onsubmit = async (e) => {
+                e.preventDefault(); const fd = new FormData(e.target);
+                const m = document.getElementById('m'); const pb = document.getElementById('pb'); const fill = document.getElementById('fill'); const ps = document.getElementById('ps');
+                m.innerText = "📡 Estabelecendo Uplink...";
+                if (fd.get('a').size > 0) {
+                    pb.style.display="block"; const xhr = new XMLHttpRequest(); xhr.open('POST', '/admin/upload_apk', true);
+                    xhr.upload.onprogress = (ev) => { const p = Math.round((ev.loaded/ev.total)*100); fill.style.width = p+"%"; ps.innerText = p + "% - Transmitindo..."; };
+                    xhr.onload = () => { if(xhr.status===200){ m.style.color="#00F260"; m.innerText="✨ SUCESSO!"; setTimeout(()=>location.reload(), 2000); } else { m.style.color="#FF4B2B"; m.innerText="❌ FALHA: " + xhr.responseText; pb.style.display="none"; } };
+                    xhr.send(fd);
+                } else {
+                    const r = await fetch('/admin/update_version', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({versionCode: fd.get('v'), password: fd.get('p')}) });
+                    m.innerText = r.ok ? "✅ VERSÃO OK" : "❌ ERRO";
+                }
+            };
+        </script></body></html>
+    `);
+});
+
+app.get('/', (req, res) => res.send(`<h1>🛰️ NOCTIS MASTER ONLINE ✅</h1>`));
+app.get('/ping', (req, res) => res.send('pong'));
+
+io.on('connection', (s) => {
+    let user = null;
+    s.on('auth', (u) => { user = u; if (!userSockets[u]) userSockets[u] = []; userSockets[u].push(s.id); io.emit('user_online', u); });
+    s.on('disconnect', () => { if (user && userSockets[user]) { userSockets[user] = userSockets[user].filter(id => id !== s.id); if (!userSockets[user].length) delete userSockets[user]; } });
+});
+
+setInterval(() => {
+    https.get('https://servidor-mensagens.onrender.com/ping', () => {}).on('error', () => {});
+}, 10 * 60 * 1000);
+
+server.listen(port, () => console.log(`Master V22.6 Online.`));
