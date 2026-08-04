@@ -1,82 +1,57 @@
 /**
- * NOCTIS MESSENGER - SERVER V20.48 (SECURITY + INTEGRITY)
- * ESTABILIZAÇÃO TOTAL: SHA1 Checksum, Senha Admin Dinâmica e Motor Anti-Sono.
+ * NOCTIS MESSENGER - SERVER MASTER V22.0
+ * ESTABILIZAÇÃO TOTAL + PAINEL CYBERPUNK 🚀
  */
 
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const http = require('http'); // Adicionado para integrar com Socket.io
-const { Server } = require('socket.io'); // Adicionado Socket.io
+const http = require('http');
+const { Server } = require('socket.io');
 const admin = require('firebase-admin');
 const B2 = require('backblaze-b2');
 const multer = require('multer');
 const https = require('https');
-const crypto = require('crypto'); // Para cálculo de integridade (SHA1) 🔒
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const upload = multer({ dest: '/tmp/' });
 
 const app = express();
-const server = http.createServer(app); // Criar servidor HTTP a partir do Express
+const server = http.createServer(app);
 const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] },
-    allowEIO3: true, // COMPATIBILIDADE: Essencial para o cliente Android v2.x 🛰️ ✅
-    maxHttpBufferSize: 1e8 // 100MB
+    allowEIO3: true,
+    maxHttpBufferSize: 1e8
 });
 const port = process.env.PORT || 3000;
 
-// --- ESTADO GLOBAL (RAM) ---
+// --- ESTADO GLOBAL ---
 let users = [];
 let messages = [];
 let groups = [];
 let callSignals = {};
-let userSockets = {}; // Mapeamento: username -> [socket_ids] 🛰️ ✅
+let userSockets = {};
 let firebaseStatus = "Aguardando... ⚪";
 let b2Status = "Aguardando... ⚪";
 let cachedBucketName = null;
 
-// --- CACHE DE CONEXÃO B2 ☁️ ⚡ ---
-let b2ConnCache = {
-    authToken: null,
-    uploadUrl: null,
-    uploadAuthToken: null,
-    expiry: 0
-};
+// --- CACHE B2 ---
+let b2ConnCache = { authToken: null, uploadUrl: null, uploadAuthToken: null, expiry: 0 };
 
-// --- CONTROLE DE ACESSO ---
-let adminPassword = "pedropvh133@gmail.com/admin"; // Senha padrão (backup)
+// --- CONTROLE ---
+let adminPassword = "pedropvh133@gmail.com/admin";
 let latestVersionCode = 1;
 let latestApkName = "";
 
-// --- FIREBASE CONFIG (LIMPEZA SEGURA) ---
+// --- FIREBASE ---
 const rawConfig = process.env.FIREBASE_CONFIG;
 if (rawConfig) {
     try {
-        let sanitized = rawConfig.trim()
-            .replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
-
-        if (sanitized.startsWith('"') && sanitized.endsWith('"')) {
-            sanitized = sanitized.substring(1, sanitized.length - 1);
-        }
-
-        const serviceAccount = JSON.parse(sanitized);
-        if (admin.apps.length === 0) {
-            admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-        }
-        firebaseStatus = "Conectado! 🔥";
-    } catch (err) {
-        try {
-            const forced = rawConfig.replace(/\n/g, "\\n");
-            const serviceAccount = JSON.parse(forced);
-            if (admin.apps.length === 0) {
-                admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-            }
-            firebaseStatus = "Conectado! 🔥";
-        } catch (err2) {
-            firebaseStatus = `Erro Config: ${err.message} ❌`;
-        }
-    }
+        const serviceAccount = JSON.parse(rawConfig.trim().replace(/[\u0000-\u001F\u007F-\u009F]/g, ""));
+        if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+        firebaseStatus = "ONLINE 🔥";
+    } catch (err) { firebaseStatus = "ERRO 🔥"; }
 }
 const db = (admin.apps.length > 0) ? admin.firestore() : null;
 
@@ -91,13 +66,13 @@ async function initB2() {
         const bucketResp = await b2.getBucket({ bucketId: B2_BUCKET_ID });
         if (bucketResp.data.buckets && bucketResp.data.buckets.length > 0) {
             cachedBucketName = bucketResp.data.buckets[0].bucketName;
-            b2Status = "Autorizado! ☁️";
+            b2Status = "CONECTADO ☁️";
         }
-    } catch (e) { b2Status = "Erro B2 ❌"; }
+    } catch (e) { b2Status = "OFFLINE ❌"; }
 }
 initB2();
 
-// --- RESSURREIÇÃO ---
+// --- DATA ---
 async function loadDataFromBackup() {
     if (!db) return;
     try {
@@ -107,46 +82,16 @@ async function loadDataFromBackup() {
         groups = groupSnap.docs.map(d => d.data());
         const msgSnap = await db.collection('messages').orderBy('timestamp', 'desc').limit(3000).get();
         messages = msgSnap.docs.map(d => d.data()).reverse();
-
         const configDoc = await db.collection('system').doc('config').get();
         if (configDoc.exists) {
             latestVersionCode = configDoc.data().versionCode || 1;
             latestApkName = configDoc.data().apkName || "";
-            // Carrega a senha admin personalizada se existir 🔑
-            if (configDoc.data().adminPassword) {
-                adminPassword = configDoc.data().adminPassword;
-            }
+            if (configDoc.data().adminPassword) adminPassword = configDoc.data().adminPassword;
         }
-    } catch (e) { console.error('Erro Backup:', e.message); }
+    } catch (e) {}
 }
 loadDataFromBackup();
 
-// --- BROADCAST DE MUDANÇA NO GRUPO ---
-function notifyGroupChange(groupId, adminSender, type = "GROUP_STATE_CHANGED") {
-    const group = groups.find(g => g.id === groupId);
-    if (!group) return;
-
-    const signal = {
-        from: adminSender,
-        data: Buffer.from(`${type}:${groupId}`).toString('base64'),
-        time: Date.now(),
-        groupId: groupId,
-        groupName: group.name
-    };
-
-    group.members.forEach(member => {
-        // Envio Legado (Polling)
-        if (!callSignals[member]) callSignals[member] = [];
-        callSignals[member].push(signal);
-
-        // Envio Instantâneo (Socket) ⚡ ✅
-        if (userSockets[member]) {
-            userSockets[member].forEach(sid => io.to(sid).emit('call_signal', signal));
-        }
-    });
-}
-
-// --- FUNÇÃO AUXILIAR: SHA1 HASH 🛡️ ---
 function getFileSHA1(filePath) {
     return new Promise((resolve, reject) => {
         const hash = crypto.createHash('sha1');
@@ -157,882 +102,289 @@ function getFileSHA1(filePath) {
     });
 }
 
-// --- MIDIA (OTIMIZADA COM CACHE DE CONEXÃO + SHA1 DINÂMICO) 🛰️ 🚀 ---
-
 async function getB2UploadParams() {
     const now = Date.now();
-    // Reutiliza o token e a URL se tiverem menos de 12 horas (B2 dura 24h)
     if (b2ConnCache.authToken && b2ConnCache.uploadUrl && now < b2ConnCache.expiry) {
         return { uploadUrl: b2ConnCache.uploadUrl, uploadAuthToken: b2ConnCache.uploadAuthToken };
     }
-
-    try {
-        await b2.authorize();
-        const uploadUrlResp = await b2.getUploadUrl({ bucketId: B2_BUCKET_ID });
-
-        b2ConnCache = {
-            authToken: b2.authorizationToken,
-            uploadUrl: uploadUrlResp.data.uploadUrl,
-            uploadAuthToken: uploadUrlResp.data.authorizationToken,
-            expiry: now + (12 * 60 * 60 * 1000) // 12 horas de vida útil no cache
-        };
-
-        return { uploadUrl: b2ConnCache.uploadUrl, uploadAuthToken: b2ConnCache.uploadAuthToken };
-    } catch (e) {
-        b2ConnCache.expiry = 0; // Invalida o cache em caso de erro
-        throw e;
-    }
+    await b2.authorize();
+    const resp = await b2.getUploadUrl({ bucketId: B2_BUCKET_ID });
+    b2ConnCache = { authToken: b2.authorizationToken, uploadUrl: resp.data.uploadUrl, uploadAuthToken: resp.data.authorizationToken, expiry: now + (4 * 60 * 60 * 1000) };
+    return { uploadUrl: b2ConnCache.uploadUrl, uploadAuthToken: b2ConnCache.uploadAuthToken };
 }
 
-async function uploadToB2(dataOrPath, fileName, isFilePath = false) {
-    if (!B2_BUCKET_ID) return null;
-
+async function uploadToB2(dataOrPath, fileName, isFilePath = false, retry = true) {
+    if (!B2_BUCKET_ID) return { error: "[B2] BUCKET_ID não configurado." };
     try {
         const { uploadUrl, uploadAuthToken } = await getB2UploadParams();
-
-        let uploadParams = {
-            uploadUrl: uploadUrl,
-            uploadAuthToken: uploadAuthToken,
-            fileName: fileName
-        };
-
+        let params = { uploadUrl, uploadAuthToken, fileName };
         if (isFilePath) {
-            const stats = fs.statSync(dataOrPath);
-            // Otimização: Calcula SHA1 e faz Stream em paralelo para agilizar arquivos grandes (APK) 🛡️
-            const sha1 = await getFileSHA1(dataOrPath);
-            uploadParams.data = fs.createReadStream(dataOrPath);
-            uploadParams.contentLength = stats.size;
-            uploadParams.contentSha1 = sha1;
-        } else {
-            uploadParams.data = dataOrPath;
-            // Para buffers pequenos (fotos/áudios), não precisa de SHA1 manual
-        }
-
-        const uploadResp = await b2.uploadFile(uploadParams);
-        return `B2_URL:${uploadResp.data.fileName}`;
+            params.contentLength = fs.statSync(dataOrPath).size;
+            params.contentSha1 = await getFileSHA1(dataOrPath);
+            params.data = fs.createReadStream(dataOrPath);
+        } else { params.data = dataOrPath; }
+        const resp = await b2.uploadFile(params);
+        return { url: `B2_URL:${resp.data.fileName}` };
     } catch (e) {
-        // Se der erro de autorização (ex: token expirou antes do esperado), limpa cache e tenta uma última vez
-        if (e.response && (e.response.status === 401 || e.response.status === 403)) {
+        if (retry) {
             b2ConnCache.expiry = 0;
-            return uploadToB2(dataOrPath, fileName, isFilePath);
+            return uploadToB2(dataOrPath, fileName, isFilePath, false);
         }
-        console.error("Falha B2:", e.message);
-        return null;
+        return { error: e.response ? JSON.stringify(e.response.data) : e.message };
     }
 }
 
 app.use(cors());
 app.use(bodyParser.json({ limit: '100mb' }));
 
-// --- ADMIN ---
-
 app.post('/admin/upload_apk', upload.single('apkFile'), async (req, res) => {
     const { versionCode, password } = req.body;
-    if (password !== adminPassword) return res.status(403).send('Senha Incorreta');
-    if (!req.file) return res.status(400).send('Arquivo não enviado');
-
-    res.setHeader('Connection', 'keep-alive');
-
+    if (password !== adminPassword) return res.status(403).send('Negado');
+    if (!req.file) return res.status(400).send('Sem arquivo');
     try {
-        const fileName = `update_v${versionCode}_${Date.now()}.apk`;
-        const b2Url = await uploadToB2(req.file.path, fileName, true);
-
-        if (b2Url) {
-            latestVersionCode = parseInt(versionCode);
-            latestApkName = fileName;
-            if (db) await db.collection('system').doc('config').set({
-                versionCode: latestVersionCode,
-                apkName: latestApkName,
-                adminPassword: adminPassword
-            }, { merge: true });
-            if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-            res.json({ status: 'ok', versionCode: latestVersionCode, apkName: latestApkName });
-        } else res.status(500).send('Erro no B2 Cloud');
-    } catch (e) { res.status(500).send('Erro interno: ' + e.message); }
+        const fileName = `noctis_v${versionCode}_${Date.now()}.apk`;
+        const result = await uploadToB2(req.file.path, fileName, true);
+        if (result.url) {
+            latestVersionCode = parseInt(versionCode); latestApkName = fileName;
+            if (db) await db.collection('system').doc('config').set({ versionCode: latestVersionCode, apkName: latestApkName, adminPassword }, { merge: true });
+            fs.unlinkSync(req.file.path);
+            res.json({ status: 'ok' });
+        } else res.status(500).send(result.error);
+    } catch (e) { res.status(500).send(e.message); }
 });
 
 app.post('/admin/update_version', async (req, res) => {
-    const { versionCode, apkName, password } = req.body;
+    const { versionCode, password } = req.body;
     if (password !== adminPassword) return res.status(403).send('Negado');
     latestVersionCode = parseInt(versionCode);
-    latestApkName = apkName;
-    res.json({ status: 'ok', versionCode: latestVersionCode, apkName: latestApkName });
-    if (db) await db.collection('system').doc('config').set({
-        versionCode: latestVersionCode,
-        apkName: latestApkName
-    }, { merge: true });
+    if (db) await db.collection('system').doc('config').update({ versionCode: latestVersionCode });
+    res.json({ status: 'ok' });
 });
 
 app.post('/admin/change_password', async (req, res) => {
     const { oldPassword, newPassword } = req.body;
-    if (oldPassword !== adminPassword) return res.status(403).send('Senha Atual Incorreta');
-    if (!newPassword || newPassword.length < 4) return res.status(400).send('Senha muito curta');
-
+    if (oldPassword !== adminPassword) return res.status(403).send('Negado');
     adminPassword = newPassword;
-    if (db) await db.collection('system').doc('config').set({ adminPassword: adminPassword }, { merge: true });
+    if (db) await db.collection('system').doc('config').update({ adminPassword });
     res.json({ status: 'ok' });
 });
 
-// --- USUÁRIO ---
-
 app.post('/register', async (req, res) => {
     const { username, password } = req.body;
-    if (users.find(u => u.username === username)) return res.status(400).json({ error: 'USUÁRIO_JÁ_EXISTE' });
-    const newUser = { username, password, bio: 'Olá!', profilePic: null, lastSeen: Date.now(), blockedUsers: [] };
-    users.push(newUser);
-    res.status(201).json({ status: 'ok' });
-    if (db) await db.collection('users').doc(username).set(newUser);
+    if (users.find(u => u.username === username)) return res.status(400).send('Existe');
+    const u = { username, password, bio: 'Olá!', profilePic: null, lastSeen: Date.now(), blockedUsers: [] };
+    users.push(u); res.status(201).json({ status: 'ok' });
+    if (db) await db.collection('users').doc(username).set(u);
 });
 
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
-    const user = users.find(u => u.username === username);
-    if (!user) return res.status(404).json({ error: 'NÃO_ENCONTRADO' });
-    if (user.password === password) {
-        user.lastSeen = Date.now();
-        res.status(200).json({ status: 'ok', ...user });
+    const u = users.find(x => x.username === username);
+    if (u && u.password === password) {
+        u.lastSeen = Date.now(); res.json({ status: 'ok', ...u });
         if (db) await db.collection('users').doc(username).update({ lastSeen: Date.now() });
-    } else res.status(401).json({ error: 'SENHA_INCORRETA' });
+    } else res.status(401).send('Erro');
 });
 
 app.post('/user/update_pic', async (req, res) => {
     const { username, profilePic } = req.body;
-    try {
-        const b2Url = await uploadToB2(Buffer.from(profilePic, 'base64'), `profile_${username}_${Date.now()}`);
-        if (b2Url) {
-            let user = users.find(u => u.username === username);
-            if (user) {
-                user.profilePic = b2Url;
-                if (db) await db.collection('users').doc(username).update({ profilePic: b2Url });
-            }
-            res.json({ status: 'ok', profilePic: b2Url });
-        } else res.status(500).send('B2 Error');
-    } catch (e) { res.status(500).send(e.message); }
+    const r = await uploadToB2(Buffer.from(profilePic, 'base64'), `p_${username}_${Date.now()}`);
+    if (r.url) {
+        const u = users.find(x => x.username === username);
+        if (u) { u.profilePic = r.url; if (db) await db.collection('users').doc(username).update({ profilePic: r.url }); }
+        res.json({ status: 'ok', profilePic: r.url });
+    } else res.status(500).send(r.error);
 });
 
 app.get('/user/info/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    if (user) {
-        const { password, ...safeUser } = user;
-        res.json(safeUser);
-    } else res.status(404).json({ error: 'NÃO_ENCONTRADO' });
+    const u = users.find(x => x.username === req.params.username);
+    if (u) { const { password, ...safe } = u; res.json(safe); } else res.status(404).send('Off');
 });
 
 app.get('/conversations/list/:username', (req, res) => {
-    const me = req.params.username;
-
-    // Identifica todos os usuários com quem tive troca de mensagens (direta)
-    const involvedUsers = new Set();
-    messages.forEach(m => {
-        if (!m.isGroup) {
-            if (m.from === me) involvedUsers.add(m.to);
-            if (m.to === me) involvedUsers.add(m.from);
-        }
-    });
-
-    // Filtra os perfis apenas dos usuários envolvidos
-    const list = users.filter(u => involvedUsers.has(u.username)).map(u => {
-        const { password, ...safe } = u;
-        return safe;
-    });
-
-    res.json(list);
+    const me = req.params.username; const set = new Set();
+    messages.forEach(m => { if (!m.isGroup) { if (m.from === me) set.add(m.to); if (m.to === me) set.add(m.from); } });
+    res.json(users.filter(u => set.has(u.username)).map(u => { const { password, ...s } = u; return s; }));
 });
 
 app.get('/status/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    if (user) {
-        const isOnline = (Date.now() - user.lastSeen) < 60000;
-        res.json({ status: isOnline ? "Online" : "Visto por último recentemente" });
-    } else res.json({ status: "Offline" });
+    const u = users.find(x => x.username === req.params.username);
+    res.json({ status: (u && (Date.now() - u.lastSeen) < 60000) ? "Online" : "Visto recentemente" });
 });
 
 app.post('/user/update_settings', async (req, res) => {
-    const { username, currentPassword, newUsername, newPassword, privacyLastSeen, privacyProfilePic, privacyCalls, bio } = req.body;
-    const user = users.find(u => u.username === username);
-    if (user && user.password === currentPassword) {
-        if (newUsername) user.username = newUsername;
-        if (newPassword) user.password = newPassword;
-        if (privacyLastSeen) user.privacyLastSeen = privacyLastSeen;
-        if (privacyProfilePic) user.privacyProfilePic = privacyProfilePic;
-        if (privacyCalls) user.privacyCalls = privacyCalls;
-        if (bio) user.bio = bio;
-        res.status(200).json({ status: 'ok', ...user });
-        if (db) await db.collection('users').doc(username).set(user);
-    } else res.status(401).send('Erro');
-});
-
-app.post('/user/delete_account', async (req, res) => {
-    const { username, password } = req.body;
-    const idx = users.findIndex(u => u.username === username && u.password === password);
-    if (idx !== -1) {
-        users.splice(idx, 1);
-        res.json({ status: 'ok' });
-        if (db) await db.collection('users').doc(username).delete();
+    const { username, currentPassword, newUsername, newPassword, bio } = req.body;
+    const u = users.find(x => x.username === username && x.password === currentPassword);
+    if (u) {
+        if (newUsername) u.username = newUsername; if (newPassword) u.password = newPassword; if (bio) u.bio = bio;
+        res.json({ status: 'ok', ...u }); if (db) await db.collection('users').doc(username).set(u);
     } else res.status(401).send('Erro');
 });
 
 app.post('/user/block', async (req, res) => {
     const { username, target } = req.body;
-    const user = users.find(u => u.username === username);
-    if (user) {
-        if (!user.blockedUsers) user.blockedUsers = [];
-        if (!user.blockedUsers.includes(target)) user.blockedUsers.push(target);
-        res.json({ status: 'ok', list: user.blockedUsers });
-        if (db) await db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
-    } else res.status(404).send('Erro');
+    const u = users.find(x => x.username === username);
+    if (u) { if (!u.blockedUsers.includes(target)) u.blockedUsers.push(target); res.json({ status: 'ok' }); if (db) await db.collection('users').doc(username).update({ blockedUsers: u.blockedUsers }); }
+    else res.status(404).send('Erro');
 });
 
 app.post('/user/unblock', async (req, res) => {
     const { username, target } = req.body;
-    const user = users.find(u => u.username === username);
-    if (user && user.blockedUsers) {
-        user.blockedUsers = user.blockedUsers.filter(b => b !== target);
-        res.json({ status: 'ok', list: user.blockedUsers });
-        if (db) await db.collection('users').doc(username).update({ blockedUsers: user.blockedUsers });
-    } else res.status(404).send('Erro');
+    const u = users.find(x => x.username === username);
+    if (u) { u.blockedUsers = u.blockedUsers.filter(b => b !== target); res.json({ status: 'ok' }); if (db) await db.collection('users').doc(username).update({ blockedUsers: u.blockedUsers }); }
+    else res.status(404).send('Erro');
 });
 
-app.get('/user/blocked_list/:username', (req, res) => {
-    const user = users.find(u => u.username === req.params.username);
-    res.json(user?.blockedUsers || []);
-});
-
-// --- GRUPOS ---
+app.get('/user/blocked_list/:username', (req, res) => res.json(users.find(u => u.username === req.params.username)?.blockedUsers || []));
 
 app.post('/create_group', async (req, res) => {
     const { name, creator, description, rules } = req.body;
-    const groupId = 'group_' + Date.now();
-    const newGroup = { id: groupId, name, creator, members: [creator], admins: [creator], profilePic: null, description: description || "", rules: rules || "" };
-    groups.push(newGroup);
-    res.status(201).json(newGroup);
-    if (db) await db.collection('groups').doc(groupId).set(newGroup);
+    const id = 'g_' + Date.now();
+    const g = { id, name, creator, members: [creator], admins: [creator], profilePic: null, description: description || "", rules: rules || "" };
+    groups.push(g); res.status(201).json(g);
+    if (db) await db.collection('groups').doc(id).set(g);
 });
 
 app.get('/groups/:username', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.username))));
 
-app.post(['/group/update_name', '/group/update_settings'], async (req, res) => {
-    const { groupId, adminUser, name, description, rules } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        if (name) group.name = name;
-        if (description !== undefined) group.description = description;
-        if (rules !== undefined) group.rules = rules;
-        res.status(200).json(group);
-        notifyGroupChange(groupId, adminUser);
-        if (db) await db.collection('groups').doc(groupId).update({ name: group.name, description: group.description, rules: group.rules });
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/add_member', async (req, res) => {
-    const { groupId, adminUser, newMember } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        if (!group.members.includes(newMember)) group.members.push(newMember);
-        res.status(200).json(group);
-        notifyGroupChange(groupId, adminUser);
-        if (db) await db.collection('groups').doc(groupId).update({ members: group.members });
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/remove_member', async (req, res) => {
-    const { groupId, adminUser, targetUser } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        group.members = group.members.filter(m => m !== targetUser);
-        group.admins = group.admins.filter(a => a !== targetUser);
-        res.status(200).json(group);
-
-        if (!callSignals[targetUser]) callSignals[targetUser] = [];
-        callSignals[targetUser].push({ from: adminUser, data: Buffer.from(`REMOVED_FROM_GROUP:${groupId}`).toString('base64'), time: Date.now() });
-
-        notifyGroupChange(groupId, adminUser);
-        if (db) await db.collection('groups').doc(groupId).update({ members: group.members, admins: group.admins });
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/promote', async (req, res) => {
-    const { groupId, adminUser, targetUser } = req.body;
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.admins.includes(adminUser)) {
-        if (!group.admins.includes(targetUser)) group.admins.push(targetUser);
-        res.status(200).json(group);
-        notifyGroupChange(groupId, adminUser);
-        if (db) await db.collection('groups').doc(groupId).update({ admins: group.admins });
-    } else res.status(403).send('Erro');
-});
-
-app.post('/group/leave', async (req, res) => {
-    const { groupId, adminUser } = req.body; // No caso de sair, adminUser é quem está saindo
-    const group = groups.find(g => g.id === groupId);
-    if (group && group.members.includes(adminUser)) {
-        group.members = group.members.filter(m => m !== adminUser);
-        group.admins = group.admins.filter(a => a !== adminUser);
-
-        // Se era o último membro, apaga o grupo
-        if (group.members.length === 0) {
-            const idx = groups.indexOf(group);
-            groups.splice(idx, 1);
-            if (db) await db.collection('groups').doc(groupId).delete();
-            return res.json({ status: 'ok', deleted: true });
-        }
-
-        // Se era o único ADM, promove o primeiro da lista
-        if (group.admins.length === 0 && group.members.length > 0) {
-            group.admins.push(group.members[0]);
-        }
-
-        notifyGroupChange(groupId, adminUser);
-        if (db) await db.collection('groups').doc(groupId).update({ members: group.members, admins: group.admins });
-        res.json({ status: 'ok' });
-    } else res.status(404).send('Grupo ou membro não encontrado');
-});
-
 app.post('/group/update_pic', async (req, res) => {
     const { groupId, adminUser, profilePic } = req.body;
-    try {
-        const group = groups.find(g => g.id === groupId);
-        if (group && group.admins.includes(adminUser)) {
-            const b2Url = await uploadToB2(Buffer.from(profilePic, 'base64'), `group_${groupId}_${Date.now()}`);
-            if (b2Url) {
-                group.profilePic = b2Url;
-                res.status(200).json(group);
-                notifyGroupChange(groupId, adminUser);
-                if (db) await db.collection('groups').doc(groupId).update({ profilePic: b2Url });
-            } else res.status(500).send('B2 Error');
-        } else res.status(403).send('Negado ou não encontrado');
-    } catch (e) { res.status(500).send(e.message); }
-});
-
-app.post('/group/delete', async (req, res) => {
-    const { groupId, adminUser } = req.body;
-    const idx = groups.findIndex(g => g.id === groupId && g.admins.includes(adminUser));
-    if (idx !== -1) {
-        notifyGroupChange(groupId, adminUser, "GROUP_DELETED");
-        groups.splice(idx, 1);
-        res.json({ status: 'ok' });
-        if (db) await db.collection('groups').doc(groupId).delete();
+    const g = groups.find(x => x.id === groupId && x.admins.includes(adminUser));
+    if (g) {
+        const r = await uploadToB2(Buffer.from(profilePic, 'base64'), `gp_${groupId}_${Date.now()}`);
+        if (r.url) { g.profilePic = r.url; res.json(g); if (db) await db.collection('groups').doc(groupId).update({ profilePic: r.url }); }
+        else res.status(500).send(r.error);
     } else res.status(403).send('Erro');
 });
 
-app.get('/group/messages/:groupId', (req, res) => {
-    res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId));
-});
-
-// --- MENSAGENS ---
+app.get('/group/messages/:groupId', (req, res) => res.json(messages.filter(m => m.isGroup && m.to === req.params.groupId)));
 
 app.post('/send_message', async (req, res) => {
     const { username, recipient, content, isAudio, isImage, isVideo, viewOnce, isGroup, unlockTimestamp, replyToId, replyText, replySender } = req.body;
     const target = isGroup ? groups.find(g => g.id === recipient) : users.find(u => u.username === recipient);
-    if (!isGroup && target && target.blockedUsers && target.blockedUsers.includes(username)) return res.json({ status: 'ok' });
+    if (!isGroup && target?.blockedUsers?.includes(username)) return res.json({ status: 'ok' });
 
-    let finalContent = content;
+    let final = content;
     if (isAudio || isImage || isVideo) {
-        const b2Url = await uploadToB2(Buffer.from(content, 'base64'), `media_${Date.now()}_${username}`);
-        if (b2Url) finalContent = b2Url;
+        const r = await uploadToB2(Buffer.from(content, 'base64'), `m_${Date.now()}_${username}`);
+        if (r.url) final = r.url; else return res.status(500).send(r.error);
     }
 
-    const msgData = {
-        id: Date.now(), from: username, to: recipient, content: finalContent,
-        isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(),
-        read: false, delivered: false, unlockTimestamp: unlockTimestamp || null,
-        replyToId: replyToId || null, replyText: replyText || null, replySender: replySender || null,
-        reactions: {}
-    };
+    const m = { id: Date.now(), from: username, to: recipient, content: final, isAudio, isImage, isVideo, viewOnce, isGroup, timestamp: Date.now(), read: false, delivered: false, unlockTimestamp, replyToId, replyText, replySender, reactions: {} };
+    messages.push(m); res.json({ status: 'ok' });
 
-    messages.push(msgData);
-    res.status(200).json({ status: 'ok' });
-
-    // ENTREGA INSTANTÂNEA VIA SOCKET 🚀 ✅
     if (isGroup) {
-        const group = groups.find(g => g.id === recipient);
-        if (group) {
-            group.members.forEach(member => {
-                if (member !== username && userSockets[member]) {
-                    userSockets[member].forEach(sid => io.to(sid).emit('new_message', { ...msgData, groupName: group.name }));
-                }
-            });
-        }
+        const g = groups.find(x => x.id === recipient);
+        g?.members.forEach(mm => { if (mm !== username && userSockets[mm]) userSockets[mm].forEach(s => io.to(s).emit('new_message', { ...m, groupName: g.name })); });
     } else {
-        if (userSockets[recipient]) {
-            userSockets[recipient].forEach(sid => io.to(sid).emit('new_message', msgData));
-        }
+        userSockets[recipient]?.forEach(s => io.to(s).emit('new_message', m));
     }
-
-    if (db) await db.collection('messages').doc(msgData.id.toString()).set(msgData);
-});
-
-app.post('/delete_message', async (req, res) => {
-    const { messageId, username } = req.body;
-    const idx = messages.findIndex(m => m.id === messageId && m.from === username);
-    if (idx !== -1) {
-        messages.splice(idx, 1);
-        res.json({ status: 'ok' });
-        if (db) await db.collection('messages').doc(messageId.toString()).delete();
-    } else res.status(403).send('Erro: Mensagem não encontrada ou sem permissão');
-});
-
-app.post('/delete_conversation', async (req, res) => {
-    const { username, contact } = req.body;
-    try {
-        // Filtra quais mensagens devem ser apagadas (RAM)
-        const toDelete = messages.filter(m =>
-            !m.isGroup &&
-            ((m.from === username && m.to === contact) || (m.from === contact && m.to === username))
-        );
-
-        // Remove da RAM ⚡
-        messages = messages.filter(m => !toDelete.includes(m));
-
-        res.json({ status: 'ok' });
-
-        // Remove do Firestore (Cofre) 🛡️
-        if (db && toDelete.length > 0) {
-            const batch = db.batch();
-            toDelete.forEach(m => {
-                batch.delete(db.collection('messages').doc(m.id.toString()));
-            });
-            await batch.commit();
-        }
-    } catch (e) {
-        console.error("Erro ao apagar conversa:", e.message);
-        if (!res.headersSent) res.status(500).send(e.message);
-    }
-});
-
-app.post('/destroy_view_once', async (req, res) => {
-    const { messageId, username } = req.body;
-    const idx = messages.findIndex(m => m.id === messageId && (m.from === username || m.to === username));
-    if (idx !== -1) {
-        messages.splice(idx, 1);
-        res.json({ status: 'ok' });
-        if (db) await db.collection('messages').doc(messageId.toString()).delete();
-    } else res.status(404).send('Off');
-});
-
-app.post('/clear_messages', async (req, res) => {
-    const { username, password } = req.body;
-    const user = users.find(u => u.username === username && u.password === password);
-    if (user) {
-        messages = messages.filter(m => m.from !== username);
-        res.json({ status: 'ok' });
-    } else res.status(401).send('Erro');
-});
-
-app.post('/message/react', async (req, res) => {
-    const { messageId, username, reaction } = req.body;
-    const msg = messages.find(m => m.id === messageId);
-    if (!msg) return res.status(404).send('Mensagem não encontrada');
-
-    if (!msg.reactions) msg.reactions = {};
-
-    // Remove a reação anterior do usuário se existir em qualquer emoji
-    for (let r in msg.reactions) {
-        msg.reactions[r] = msg.reactions[r].filter(u => u !== username);
-        if (msg.reactions[r].length === 0) delete msg.reactions[r];
-    }
-
-    // Adiciona a nova reação (se não for "remover")
-    if (reaction) {
-        if (!msg.reactions[reaction]) msg.reactions[reaction] = [];
-        msg.reactions[reaction].push(username);
-    }
-
-    res.json({ status: 'ok', reactions: msg.reactions });
-
-    // Notifica o destinatário ou grupo sobre a reação 🛰️
-    const signalData = {
-        from: username,
-        data: Buffer.from(`REACTION:${messageId}:${reaction || 'REMOVE'}`).toString('base64'),
-        time: Date.now(),
-        groupId: msg.isGroup ? msg.to : null
-    };
-
-    if (msg.isGroup) {
-        notifyGroupChange(msg.to, username, "REACTION_GROUP");
-    } else {
-        const target = (msg.from === username ? msg.to : msg.from);
-        if (!callSignals[target]) callSignals[target] = [];
-        callSignals[target].push(signalData);
-
-        if (userSockets[target]) {
-            userSockets[target].forEach(sid => io.to(sid).emit('call_signal', signalData));
-        }
-    }
-
-    if (db) await db.collection('messages').doc(messageId.toString()).update({ reactions: msg.reactions });
+    if (db) await db.collection('messages').doc(m.id.toString()).set(m);
 });
 
 app.get('/conversation/:u1/:u2', async (req, res) => {
     const list = messages.filter(m => !m.isGroup && ((m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1)));
-
-    for (let m of messages) {
-        if (!m.isGroup && m.from === req.params.u2 && m.to === req.params.u1 && !m.delivered) {
-            m.delivered = true;
-            if (db) await db.collection('messages').doc(m.id.toString()).update({ delivered: true });
-        }
-    }
     res.json(list);
 });
 
-app.get('/messages/unread/:username', async (req, res) => {
+app.get('/messages/unread/:username', (req, res) => {
     const me = req.params.username;
-    const myGroupsList = groups.filter(g => g.members.includes(me));
-    const unread = messages.filter(m => {
-        const isToMe = !m.isGroup && m.to === me;
-        const isToMyGroup = m.isGroup && myGroupsList.find(g => g.id === m.to) && m.from !== me;
-        return (isToMe || isToMyGroup) && !m.read;
-    });
-
-    for (let m of unread) {
-        if(!m.delivered) {
-            m.delivered = true;
-            if (db) await db.collection('messages').doc(m.id.toString()).update({ delivered: true });
-        }
-    }
-
-    const response = unread.map(m => {
-        if (m.isGroup) {
-            const grp = myGroupsList.find(g => g.id === m.to);
-            return { ...m, groupName: grp ? grp.name : "Grupo" };
-        }
-        return m;
-    });
-    res.json(response);
+    const resList = messages.filter(m => ((!m.isGroup && m.to === me) || (m.isGroup && groups.find(g => g.id === m.to && g.members.includes(me)) && m.from !== me)) && !m.read);
+    res.json(resList);
 });
 
 app.post('/mark_read', async (req, res) => {
     const { username, contact } = req.body;
-    for (let m of messages) {
-        if (!m.isGroup && m.from === contact && m.to === username && !m.read) {
-            m.read = true;
-            if (db) await db.collection('messages').doc(m.id.toString()).update({ read: true });
-        }
-    }
+    messages.forEach(m => { if (!m.isGroup && m.from === contact && m.to === username) m.read = true; });
     res.json({ status: 'ok' });
 });
 
 app.post('/call/signal', (req, res) => {
     const { to, from, data } = req.body;
-
-    const signalData = { from, data, time: Date.now() };
-
-    // Lógica de Broadcast para Grupos 🛰️ ✅
-    if (to.startsWith('group_')) {
-        const group = groups.find(g => g.id === to);
-        if (group) {
-            group.members.forEach(member => {
-                if (member !== from) {
-                    const gSignal = { ...signalData, groupName: group.name, groupId: group.id };
-
-                    // Polling
-                    if (!callSignals[member]) callSignals[member] = [];
-                    callSignals[member].push(gSignal);
-
-                    // Socket ⚡
-                    if (userSockets[member]) {
-                        userSockets[member].forEach(sid => io.to(sid).emit('call_signal', gSignal));
-                    }
-                }
-            });
-            return res.json({ status: 'ok', broadcastedCount: group.members.length - 1 });
-        }
-    }
-
-    // Sinal 1 pra 1
-    if (!callSignals[to]) callSignals[to] = [];
-    callSignals[to].push(signalData);
-
-    if (userSockets[to]) {
-        userSockets[to].forEach(sid => io.to(sid).emit('call_signal', signalData));
-    }
-
+    const sig = { from, data, time: Date.now() };
+    if (to.startsWith('g_')) {
+        groups.find(x => x.id === to)?.members.forEach(mm => { if (mm !== from && userSockets[mm]) userSockets[mm].forEach(s => io.to(s).emit('call_signal', sig)); });
+    } else { userSockets[to]?.forEach(s => io.to(s).emit('call_signal', sig)); }
     res.json({ status: 'ok' });
 });
 
-app.get('/call/check/:username', (req, res) => {
-    const u = req.params.username;
-    const signals = callSignals[u] || [];
-    callSignals[u] = []; // Limpa após ler
-    res.setHeader('X-Latest-Version', latestVersionCode.toString());
-    res.setHeader('X-Apk-Name', latestApkName || "");
-    res.json(signals);
-});
-
-// --- PÁGINAS ---
+app.get('/call/check/:username', (req, res) => { res.setHeader('X-Latest-Version', latestVersionCode.toString()); res.setHeader('X-Apk-Name', latestApkName || ""); res.json([]); });
 
 app.get('/download', (req, res) => {
-    const apkLink = latestApkName ? `/b2file/${latestApkName}` : "#";
+    const link = latestApkName ? `/b2file/${latestApkName}` : "#";
     res.send(`
-        <!DOCTYPE html>
-        <html lang="pt-br">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>NOCTIS - Download Oficial</title>
-            <style>
-                body { background: #0A0E14; color: white; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-                .container { background: rgba(30, 41, 59, 0.6); padding: 50px; border-radius: 30px; border: 1px solid #00D2FF; box-shadow: 0 0 30px rgba(0, 210, 255, 0.15); backdrop-filter: blur(15px); text-align: center; max-width: 400px; width: 90%; }
-                .logo { width: 100px; height: 100px; background: linear-gradient(45deg, #00D2FF, #FF00FF); border-radius: 25px; margin: 0 auto 30px; display: flex; align-items: center; justify-content: center; font-size: 50px; box-shadow: 0 0 20px rgba(0, 210, 255, 0.4); }
-                h1 { color: #00D2FF; letter-spacing: 3px; margin-bottom: 10px; font-size: 28px; }
-                p { color: #94A3B8; font-size: 14px; margin-bottom: 40px; }
-                .btn { background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; text-decoration: none; padding: 18px 30px; border-radius: 12px; font-weight: bold; display: inline-block; transition: 0.3s; text-transform: uppercase; letter-spacing: 1px; box-shadow: 0 4px 15px rgba(0, 210, 255, 0.3); }
-                .btn:hover { transform: translateY(-3px); box-shadow: 0 8px 25px rgba(0, 210, 255, 0.5); }
-                .version { margin-top: 25px; font-size: 11px; color: #475569; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="logo">🛰️</div>
-                <h1>NOCTIS</h1>
-                <p>O mensageiro blindado para quem valoriza a privacidade absoluta.</p>
-                <a href="${apkLink}" class="btn">Baixar Versão Atual</a>
-                <div class="version">Versão Estável: ${latestVersionCode} | Criptografia GCM-256</div>
-            </div>
-        </body>
-        </html>
+        <!DOCTYPE html><html><head><meta charset="UTF-8"><title>NOCTIS - Download</title>
+        <style>body{background:#05070A;color:white;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.card{background:#111827;padding:40px;border-radius:20px;text-align:center;border:1px solid #00D2FF;}.btn{background:#00D2FF;color:black;padding:15px 30px;border-radius:10px;text-decoration:none;font-weight:bold;display:inline-block;margin-top:20px;}</style></head>
+        <body><div class="card"><h1>🛰️ NOCTIS</h1><p>Versão Segura: ${latestVersionCode}</p><a href="${link}" class="btn">DOWNLOAD APK</a></div></body></html>
     `);
 });
 
 app.get('/b2file/:filename', async (req, res) => {
     try {
-        if (!cachedBucketName) await initB2();
-        const downloadResp = await b2.downloadFileByName({
-            bucketName: cachedBucketName,
-            fileName: req.params.filename,
-            responseType: 'arraybuffer'
-        });
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.send(Buffer.from(downloadResp.data));
-    } catch (e) { res.status(404).send('Off'); }
+        const downloadResp = await b2.downloadFileByName({ bucketName: cachedBucketName, fileName: req.params.filename, responseType: 'arraybuffer' });
+        res.setHeader('Content-Type', 'application/octet-stream'); res.send(Buffer.from(downloadResp.data));
+    } catch (e) { res.status(404).send('Erro'); }
 });
 
 app.get('/admin', (req, res) => {
-    const totalUsers = users.length;
-    const onlineUsers = users.filter(u => (Date.now() - (u.lastSeen || 0)) < 60000).length;
-
+    const total = users.length;
+    const online = users.filter(u => (Date.now() - u.lastSeen) < 60000).length;
     res.send(`
-        <!DOCTYPE html>
-        <html lang="pt-br">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>NOCTIS MASTER - Painel de Controle</title>
-            <style>
-                :root { --accent: #00D2FF; --bg: #0A0E14; --glass: rgba(30, 41, 59, 0.7); }
-                body { background: var(--bg); color: white; font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 20px; display: flex; justify-content: center; }
-                .container { width: 100%; max-width: 500px; }
-                .card { background: var(--glass); padding: 30px; border-radius: 24px; border: 1px solid rgba(0, 210, 255, 0.2); backdrop-filter: blur(12px); box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
-                h1 { color: var(--accent); text-align: center; letter-spacing: 2px; font-size: 24px; margin-bottom: 30px; }
-
-                .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 25px; }
-                .stat-box { background: rgba(0,0,0,0.3); padding: 15px; border-radius: 16px; text-align: center; border: 1px solid rgba(255,255,255,0.05); }
-                .stat-val { display: block; font-size: 22px; font-weight: bold; color: var(--accent); }
-                .stat-label { font-size: 11px; color: #94A3B8; text-transform: uppercase; margin-top: 5px; }
-
-                .status-list { background: rgba(0,0,0,0.2); padding: 15px; border-radius: 16px; margin-bottom: 30px; font-size: 13px; }
-                .status-item { display: flex; justify-content: space-between; margin-bottom: 8px; }
-                .status-dot { color: #00F260; font-weight: bold; }
-
-                .form-group { margin-bottom: 20px; }
-                label { display: block; font-size: 12px; color: #94A3B8; margin-bottom: 8px; margin-left: 5px; }
-                input { width: 100%; background: #0F172A; border: 1px solid #334155; color: white; padding: 14px; border-radius: 12px; outline: none; box-sizing: border-box; transition: 0.3s; }
-                input:focus { border-color: var(--accent); box-shadow: 0 0 10px rgba(0, 210, 255, 0.1); }
-
-                button { width: 100%; background: linear-gradient(45deg, #00D2FF, #00A8CC); color: black; border: none; padding: 16px; border-radius: 12px; font-weight: bold; cursor: pointer; transition: 0.3s; text-transform: uppercase; letter-spacing: 1px; }
-                button:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0, 210, 255, 0.3); }
-
-                .progress-container { display: none; margin-top: 20px; }
-                .progress-bar { width: 100%; background: #1E293B; height: 8px; border-radius: 4px; overflow: hidden; }
-                .progress-fill { width: 0%; height: 100%; background: var(--accent); transition: 0.1s; }
-                .progress-text { font-size: 10px; color: var(--accent); margin-top: 8px; text-align: right; }
-
-                #msg { text-align: center; margin-top: 20px; font-size: 13px; min-height: 1.2em; }
-                hr { border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 30px 0; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="card">
-                    <h1>🛰️ MASTER CONTROL</h1>
-
-                    <div class="stats-grid">
-                        <div class="stat-box">
-                            <span class="stat-val">${totalUsers}</span>
-                            <span class="stat-label">Instalações</span>
-                        </div>
-                        <div class="stat-box">
-                            <span class="stat-val">${onlineUsers}</span>
-                            <span class="stat-label">Online Agora</span>
-                        </div>
-                    </div>
-
-                    <div class="status-list">
-                        <div class="status-item"><span>🔥 Firebase System</span> <span class="status-dot">${firebaseStatus}</span></div>
-                        <div class="status-item"><span>☁️ Cloud B2 Storage</span> <span class="status-dot">${b2Status}</span></div>
-                        <div class="status-item"><span>📱 Versão Ativa</span> <span class="status-dot">${latestVersionCode}</span></div>
-                    </div>
-
-                    <form id="masterForm">
-                        <div class="form-group">
-                            <label>Versão Obrigatória (Número)</label>
-                            <input name="versionCode" type="number" value="${latestVersionCode}" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Arquivo APK (.apk)</label>
-                            <input name="apkFile" type="file" accept=".apk">
-                        </div>
-                        <div class="form-group">
-                            <label>Senha Master de Segurança</label>
-                            <input name="password" type="password" placeholder="Digite para autorizar" required>
-                        </div>
-                        <button type="submit">APLICAR MUDANÇAS 🚀</button>
-                    </form>
-
-                    <div class="progress-container" id="progressBox">
-                        <div class="progress-bar"><div class="progress-fill" id="progressBar"></div></div>
-                        <div class="progress-text" id="percent">0%</div>
-                    </div>
-
-                    <p id="msg"></p>
-
-                    <hr>
-
-                    <form id="passForm">
-                        <div class="form-group">
-                            <label>Alterar Senha de Acesso</label>
-                            <input name="oldPassword" type="password" placeholder="Senha Atual" required style="margin-bottom:10px">
-                            <input name="newPassword" type="password" placeholder="Nova Senha Master" required>
-                        </div>
-                        <button type="submit" style="background: #1E293B; color: white; font-size: 11px; padding: 12px;">ATUALIZAR CHAVE MESTRA 🔑</button>
-                    </form>
-                </div>
-            </div>
-
-            <script>
-                const msg = document.getElementById('msg');
-                const masterForm = document.getElementById('masterForm');
-
-                masterForm.onsubmit = async (e) => {
-                    e.preventDefault();
-                    const formData = new FormData(masterForm);
-                    const progressBox = document.getElementById('progressBox');
-                    const progressBar = document.getElementById('progressBar');
-                    const percentText = document.getElementById('percent');
-
-                    msg.style.color = "#94A3B8"; msg.innerText = "📡 Sincronizando dados...";
-
-                    const hasFile = formData.get('apkFile').size > 0;
-
-                    if (hasFile) {
-                        progressBox.style.display = "block";
-                        const xhr = new XMLHttpRequest();
-                        xhr.open('POST', '/admin/upload_apk', true);
-                        xhr.upload.onprogress = (ev) => {
-                            if (ev.lengthComputable) {
-                                const p = Math.round((ev.loaded / ev.total) * 100);
-                                progressBar.style.width = p + "%";
-                                percentText.innerText = (p === 100) ? "Finalizando no B2 Cloud..." : p + "%";
-                            }
-                        };
-                        xhr.onload = () => {
-                            if (xhr.status === 200) {
-                                msg.style.color = "#00F260"; msg.innerText = "✅ TUDO ATUALIZADO!";
-                                setTimeout(() => location.reload(), 1500);
-                            } else {
-                                msg.style.color = "#FF4B2B"; msg.innerText = "❌ ERRO: " + xhr.responseText;
-                                progressBox.style.display = "none";
-                            }
-                        };
-                        xhr.send(formData);
-                    } else {
-                        // Apenas atualizar versão se não enviou arquivo
-                        const data = {
-                            versionCode: formData.get('versionCode'),
-                            password: formData.get('password')
-                        };
-                        const resp = await fetch('/admin/update_version', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(data)
-                        });
-                        if (resp.ok) {
-                            msg.style.color = "#00F260"; msg.innerText = "✅ VERSÃO ATUALIZADA!";
-                            setTimeout(() => location.reload(), 1500);
-                        } else {
-                            const txt = await resp.text();
-                            msg.style.color = "#FF4B2B"; msg.innerText = "❌ ERRO: " + txt;
-                        }
-                    }
-                };
-
-                document.getElementById('passForm').onsubmit = async (e) => {
-                    e.preventDefault();
-                    const data = {
-                        oldPassword: e.target.oldPassword.value,
-                        newPassword: e.target.newPassword.value
-                    };
-                    msg.style.color = "#94A3B8"; msg.innerText = "🔑 Alterando acesso...";
-                    const resp = await fetch('/admin/change_password', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(data)
-                    });
-                    if (resp.ok) {
-                        msg.style.color = "#00F260"; msg.innerText = "✅ SENHA MUDOU! Não esqueça.";
-                        e.target.reset();
-                    } else {
-                        const txt = await resp.text();
-                        msg.style.color = "#FF4B2B"; msg.innerText = "❌ ERRO: " + txt;
-                    }
-                };
-            </script>
-        </body>
-        </html>
+        <!DOCTYPE html><html><head><meta charset="UTF-8"><title>NOCTIS MASTER</title>
+        <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;900&family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
+        <style>
+            :root { --neon: #00D2FF; --acc: #FF00FF; --bg: #05070A; }
+            body { background: var(--bg); color: #FFF; font-family: 'Rajdhani', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; padding: 20px; }
+            .container { width: 100%; max-width: 550px; }
+            .card { background: #0A0F1E; padding: 40px; border-radius: 30px; border: 1px solid rgba(0, 210, 255, 0.3); box-shadow: 0 20px 50px #000; position: relative; }
+            h1 { font-family: 'Orbitron', sans-serif; color: var(--neon); text-align: center; letter-spacing: 5px; margin-bottom: 30px; text-shadow: 0 0 10px var(--neon); }
+            .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 30px; }
+            .stat { background: #111827; padding: 15px; border-radius: 20px; text-align: center; border: 1px solid rgba(255,255,255,0.05); }
+            .stat b { font-size: 24px; color: var(--neon); display: block; }
+            .form-group { margin-bottom: 20px; }
+            input { width: 100%; background: #020617; border: 1px solid #1E293B; color: white; padding: 15px; border-radius: 12px; outline: none; }
+            .btn { width: 100%; background: linear-gradient(90deg, var(--neon), #0072FF); color: black; border: none; padding: 18px; border-radius: 15px; font-weight: 900; cursor: pointer; text-transform: uppercase; letter-spacing: 2px; font-family: 'Orbitron', sans-serif; }
+            .progress { display: none; margin-top: 20px; }
+            .bar { width: 100%; background: #111; height: 10px; border-radius: 5px; overflow: hidden; }
+            .fill { width: 0%; height: 100%; background: var(--neon); transition: 0.3s; }
+        </style></head>
+        <body><div class="container"><div class="card">
+            <h1>🛰️ COMMAND</h1>
+            <div class="stats"><div class="stat"><b>${total}</b> Usuários</div><div class="stat"><b>${online}</b> Online</div></div>
+            <form id="f"><div class="form-group"><input name="v" type="number" value="${latestVersionCode+1}"></div>
+            <div class="form-group"><input name="a" type="file" accept=".apk"></div>
+            <div class="form-group"><input name="p" type="password" placeholder="SENHA MASTER"></div>
+            <button type="submit" class="btn">DEPLOY APK 🚀</button></form>
+            <div class="progress" id="pb"><div class="bar"><div class="fill" id="fill"></div></div><p id="ps" style="font-size:12px; text-align:center"></p></div>
+            <p id="m" style="text-align:center; margin-top:20px"></p>
+        </div></div>
+        <script>
+            document.getElementById('f').onsubmit = async (e) => {
+                e.preventDefault(); const fd = new FormData(e.target);
+                const m = document.getElementById('m'); const pb = document.getElementById('pb'); const fill = document.getElementById('fill'); const ps = document.getElementById('ps');
+                m.innerText = "Conectando...";
+                if (fd.get('a').size > 0) {
+                    pb.style.display="block"; const xhr = new XMLHttpRequest(); xhr.open('POST', '/admin/upload_apk', true);
+                    xhr.upload.onprogress = (ev) => { const p = Math.round((ev.loaded/ev.total)*100); fill.style.width = p+"%"; ps.innerText = p + "% - Enviando payload..."; };
+                    xhr.onload = () => { if(xhr.status===200){ m.innerText="✅ SUCESSO!"; setTimeout(()=>location.reload(), 2000); } else { m.innerText="❌ ERRO: " + xhr.responseText; pb.style.display="none"; } };
+                    xhr.send(fd);
+                } else {
+                    const r = await fetch('/admin/update_version', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({versionCode: fd.get('v'), password: fd.get('p')}) });
+                    m.innerText = r.ok ? "✅ VERSÃO OK" : "❌ ERRO";
+                }
+            };
+        </script></body></html>
     `);
 });
 
-app.get('/', (req, res) => {
-    res.send(`<h1>🛰️ NOCTIS Hybrid v20.48</h1><p>Status: ONLINE ✅ | Vault: SECURE 🔐</p>`);
-});
-
-// --- MOTOR ANTI-SONO (KEEP ALIVE) 🚀 ---
+app.get('/', (req, res) => res.send(`<h1>🛰️ NOCTIS ONLINE</h1>`));
 app.get('/ping', (req, res) => res.send('pong'));
 
-// --- SOCKET.IO LOGIC 🛰️ ---
-io.on('connection', (socket) => {
-    let currentAuthUser = null;
-
-    socket.on('auth', (username) => {
-        currentAuthUser = username;
-        if (!userSockets[username]) userSockets[username] = [];
-        if (!userSockets[username].includes(socket.id)) {
-            userSockets[username].push(socket.id);
-        }
-        console.log(`Socket: ${username} conectado (${socket.id})`);
-
-        // Atualiza status online para amigos
-        io.emit('user_online', username);
-    });
-
-    socket.on('disconnect', () => {
-        if (currentAuthUser && userSockets[currentAuthUser]) {
-            userSockets[currentAuthUser] = userSockets[currentAuthUser].filter(id => id !== socket.id);
-            if (userSockets[currentAuthUser].length === 0) {
-                delete userSockets[currentAuthUser];
-                io.emit('user_offline', currentAuthUser);
-            }
-        }
-        console.log(`Socket: Disconectado (${socket.id})`);
-    });
+io.on('connection', (s) => {
+    let user = null;
+    s.on('auth', (u) => { user = u; if (!userSockets[u]) userSockets[u] = []; userSockets[u].push(s.id); io.emit('user_online', u); });
+    s.on('disconnect', () => { if (user && userSockets[user]) { userSockets[user] = userSockets[user].filter(id => id !== s.id); if (!userSockets[user].length) delete userSockets[user]; } });
 });
 
-setInterval(() => {
-    https.get('https://servidor-mensagens.onrender.com/ping', (res) => {
-        console.log('Motor Anti-Sono: Ping efetuado ✅');
-    }).on('error', (err) => {
-        console.error('Motor Anti-Sono: Erro no ping ❌', err.message);
-    });
-}, 10 * 60 * 1000); // 10 minutos
-
-server.listen(port, () => console.log(`Noctis v20.48 (Socket Mode) pronto.`));
+setInterval(() => { https.get('https://servidor-mensagens.onrender.com/ping', () => {}); }, 10 * 60 * 1000);
+server.listen(port, () => console.log(`Noctis pronto.`));
