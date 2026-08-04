@@ -25,6 +25,7 @@ const port = process.env.PORT || 3000;
 let users = [];
 let messages = [];
 let groups = [];
+let callSignals = {}; // ARMAZENAMENTO DE SINAIS DE CHAMADA 📞 ✅
 let userSockets = {};
 let latestVersionCode = 1;
 let latestApkName = "";
@@ -158,12 +159,33 @@ app.post('/send_message', async (req, res) => {
     if (db) await db.collection('messages').doc(m.id.toString()).set(m);
 });
 
-app.get('/conversation/:u1/:u2', (req, res) => {
-    res.json(messages.filter(m => !m.isGroup && ((m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1))));
+app.get('/conversation/:u1/:u2', async (req, res) => {
+    const list = messages.filter(m => !m.isGroup && ((m.from === req.params.u1 && m.to === req.params.u2) || (m.from === req.params.u2 && m.to === req.params.u1)));
+
+    // MARCA COMO ENTREGUE: Quando o usuário abre a conversa 🛰️ ✅
+    let changed = false;
+    for (let m of messages) {
+        if (!m.isGroup && m.from === req.params.u2 && m.to === req.params.u1 && !m.delivered) {
+            m.delivered = true;
+            changed = true;
+            if (db) db.collection('messages').doc(m.id.toString()).update({ delivered: true });
+        }
+    }
+    res.json(list);
 });
 
 app.get('/messages/unread/:u', (req, res) => {
-    res.json(messages.filter(m => !m.read && ((!m.isGroup && m.to === req.params.u) || (m.isGroup && groups.find(g => g.id === m.to && g.members.includes(req.params.u)) && m.from !== req.params.u))));
+    const me = req.params.u;
+    const resList = messages.filter(m => !m.read && ((!m.isGroup && m.to === me) || (m.isGroup && groups.find(g => g.id === m.to && g.members.includes(me)) && m.from !== me)));
+
+    // MARCA COMO ENTREGUE: Assim que o serviço de fundo do amigo "ver" a mensagem 🛰️ ✅
+    resList.forEach(m => {
+        if (!m.delivered) {
+            m.delivered = true;
+            if (db) db.collection('messages').doc(m.id.toString()).update({ delivered: true });
+        }
+    });
+    res.json(resList);
 });
 
 app.get('/groups/:u', (req, res) => res.json(groups.filter(g => g.members.includes(req.params.u))));
@@ -177,6 +199,42 @@ app.get('/conversations/list/:u', (req, res) => {
     const me = req.params.u; const set = new Set();
     messages.forEach(m => { if(!m.isGroup){ if(m.from===me) set.add(m.to); if(m.to===me) set.add(m.from); }});
     res.json(users.filter(u => set.has(u.username)).map(u => { const {password, ...s} = u; return s; }));
+});
+
+app.post('/call/signal', (req, res) => {
+    const { to, from, data } = req.body;
+    const signalData = { from, data, time: Date.now() };
+
+    // LÓGICA DE BROADCAST PARA GRUPOS 🛰️ ✅
+    if (to.startsWith('group_')) {
+        const group = groups.find(g => g.id === to);
+        if (group) {
+            group.members.forEach(member => {
+                if (member !== from) {
+                    const gSignal = { ...signalData, groupName: group.name, groupId: group.id };
+                    if (!callSignals[member]) callSignals[member] = [];
+                    callSignals[member].push(gSignal);
+                    userSockets[member]?.forEach(sid => io.to(sid).emit('call_signal', gSignal));
+                }
+            });
+            return res.json({ status: 'ok' });
+        }
+    }
+
+    // SINAL 1 PRA 1
+    if (!callSignals[to]) callSignals[to] = [];
+    callSignals[to].push(signalData);
+    userSockets[to]?.forEach(sid => io.to(sid).emit('call_signal', signalData));
+    res.json({ status: 'ok' });
+});
+
+app.get('/call/check/:username', (req, res) => {
+    const u = req.params.username;
+    const signals = callSignals[u] || [];
+    callSignals[u] = []; // Limpa após o celular ler 🧹 ✅
+    res.setHeader('X-Latest-Version', latestVersionCode.toString());
+    res.setHeader('X-Apk-Name', latestApkName || "");
+    res.json(signals);
 });
 
 app.get('/b2file/:f', async (req, res) => {
